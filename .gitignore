@@ -1,0 +1,17 @@
+node_modules/
+dist/
+build/
+coverage/
+
+# Holds MYSQL_PASSWORD, SESSION_SECRET, ADMIN_PASSWORD and SMTP_PASSWORD.
+# Never commit it. `.env.example` is the one that ships.
+.env
+.env.local
+.env.*.local
+
+# Whatever this machine happened to receive. The database rows point at these
+# files, so they belong with a backup, not with the source.
+uploads/
+
+*.log
+.DS_Store

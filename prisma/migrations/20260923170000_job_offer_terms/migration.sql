@@ -1,0 +1,21 @@
+-- AlterTable
+ALTER TABLE `Job` ADD COLUMN `ctcIncludes` JSON NULL,
+    ADD COLUMN `ctcNote` TEXT NULL,
+    ADD COLUMN `designation` VARCHAR(191) NULL,
+    ADD COLUMN `employerName` VARCHAR(191) NULL,
+    ADD COLUMN `employerType` VARCHAR(191) NULL,
+    ADD COLUMN `nightShiftSafety` TEXT NULL,
+    ADD COLUMN `noFeeDeclaredAt` DATETIME(3) NULL,
+    ADD COLUMN `noFeeDeclaredById` VARCHAR(191) NULL,
+    ADD COLUMN `offerConditionNote` TEXT NULL,
+    ADD COLUMN `offerConditional` VARCHAR(191) NULL,
+    ADD COLUMN `offerConditions` JSON NULL,
+    ADD COLUMN `offerLetterDays` INTEGER NULL,
+    ADD COLUMN `probationCtc` DECIMAL(12, 2) NULL,
+    ADD COLUMN `probationMonths` INTEGER NULL,
+    ADD COLUMN `resultDays` INTEGER NULL,
+    ADD COLUMN `sector` VARCHAR(191) NULL,
+    ADD COLUMN `trainingLocation` VARCHAR(191) NULL,
+    ADD COLUMN `trainingMonths` INTEGER NULL,
+    ADD COLUMN `trainingStipend` DECIMAL(10, 2) NULL;
+

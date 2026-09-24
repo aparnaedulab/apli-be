@@ -1,0 +1,3110 @@
+// ---------------------------------------------------------------------------
+// Campus Hiring Platform - data model
+//
+// Multi-tenancy note: College is already the tenant boundary of this domain.
+// Every campus-side row reaches a College, and every student reaches one
+// through their Batch. Making this multi-tenant later is therefore about
+// onboarding, host routing and enforcing isolation in the query layer - not
+// about reshaping these tables.
+// ---------------------------------------------------------------------------
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// Enums
+// ---------------------------------------------------------------------------
+
+enum Role {
+  CANDIDATE
+  COMPANY
+  CAMPUS
+  ADMIN
+}
+
+/// Which world a role belongs to. Candidates are absent on purpose.
+enum RoleScope {
+  CAMPUS
+  COMPANY
+  ADMIN
+}
+
+enum CampusRole {
+  TPO
+  COORDINATOR
+}
+
+enum CompanyRole {
+  OWNER
+  RECRUITER
+  INTERVIEWER
+}
+
+enum PlacementType {
+  FINAL
+  INTERNSHIP
+}
+
+enum JobStatus {
+  DRAFT
+  PUBLISHED
+  CLOSED
+}
+
+/// The campus approval gate. One row per college per job.
+enum PostingStatus {
+  PENDING
+  ACCEPTED
+  DECLINED
+}
+
+enum ApplicationStatus {
+  APPLIED
+  UNDER_REVIEW
+
+  /// Picked out of the pile, before any round has happened.
+  ///
+  /// Distinct from IN_ROUND on purpose. A campus drive shortlists from the
+  /// applications, tells those students they are through, and only then
+  /// calls them to a date and a place - and being told "you are shortlisted"
+  /// on Monday and "your interview is on Thursday at 10 in Hall B" on
+  /// Wednesday are two different messages. Folding them into one state meant
+  /// the portal could only ever send the second.
+  SHORTLISTED
+
+  IN_ROUND
+  WAITLISTED
+  OFFERED
+  ACCEPTED
+  DECLINED
+  HIRED
+  REJECTED
+  WITHDRAWN
+}
+
+enum RoundOutcome {
+  PENDING
+  PASSED
+  FAILED
+  SKIPPED
+}
+
+enum CompanyStatus {
+  PENDING // applied, cannot publish anything yet
+  VERIFIED // may publish; colleges still approve each posting
+  REJECTED // turned down, with a reason on the record
+  SUSPENDED // was verified, stopped afterwards
+}
+
+/// Headcount bands, because nobody keeps an exact number current.
+enum CompanySize {
+  STARTUP // 1-50
+  SMALL // 51-200
+  MID // 201-1000
+  LARGE // 1001-5000
+  ENTERPRISE // 5000+
+}
+
+enum InviteKind {
+  STUDENT
+  CAMPUS_MEMBER
+  COMPANY_MEMBER
+
+  /// An operations login. The only way to make one through the app - and like
+  /// every other account, the person sets their own password.
+  ADMIN_MEMBER
+}
+
+// ---------------------------------------------------------------------------
+// Identity
+// ---------------------------------------------------------------------------
+
+model User {
+  id           String @id @default(cuid())
+  email        String @unique
+  passwordHash String
+  fullName     String
+
+  /// How somebody is reached when the email bounces or the link never
+  /// arrives. A student's number lives on their Candidate record because the
+  /// college enters it with the rest of the roster; this is for everyone else.
+  phone String?
+
+  role        Role
+  isActive    Boolean   @default(true)
+  lastLoginAt DateTime?
+  /// The language the person reads the portal in: en, hi or mr.
+  locale      String?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  candidate         Candidate?
+  campusMember      CampusMember?
+  companyMember     CompanyMember?
+  notifications     Notification[]
+  statusEvents      StatusEvent[]          @relation("StatusEventActor")
+  postingsDecided   JobPosting[]           @relation("PostingDecider")
+  roundResults      RoundResult[]          @relation("RoundEvaluator")
+  jobsCreated       Job[]                  @relation("JobCreator")
+  invitesSent       Invite[]               @relation("InviteSender")
+  invitesToClaim    Invite[]               @relation("InviteAccount")
+  companiesReviewed Company[]              @relation("CompanyReviewer")
+  companyPosts      CompanyPost[]          @relation("CompanyPostAuthor")
+  assessmentsSet    Assessment[]           @relation("AssessmentAuthor")
+  assessmentsMarked AssessmentAssignment[] @relation("AssessmentReviewer")
+  posts             Post[]                 @relation("PostAuthor")
+  postComments      PostComment[]          @relation("CommentAuthor")
+  postLikes         PostLike[]             @relation("PostLiker")
+  counselling       CounsellingRequest[]   @relation("Counsellor")
+
+  adminMember     AdminMember?
+  jobTeams        JobTeamMember[] @relation("JobTeam")
+  authoredNotices Notice[]        @relation("NoticeAuthor")
+
+  @@index([role])
+}
+
+// ---------------------------------------------------------------------------
+// Tenants
+//
+// A tenant is an institution that buys the portal: a university with its
+// affiliated colleges, a single autonomous college, or a group (a trust or
+// society) that runs several. All three are the same shape - a tenant owns
+// colleges - so a single college is simply a tenant with one college in it.
+//
+// Companies are deliberately NOT inside a tenant. A recruiter is verified once
+// and hires across every institution on the platform; each college still
+// approves each posting for itself, which is the gate that matters.
+// ---------------------------------------------------------------------------
+
+enum TenantKind {
+  UNIVERSITY
+  COLLEGE
+  GROUP
+}
+
+/// DRAFT while the platform team is still onboarding it - invisible to
+/// everybody else. ACTIVE once launched. SUSPENDED keeps the data and shuts
+/// the door.
+enum TenantStatus {
+  DRAFT
+  ACTIVE
+  SUSPENDED
+}
+
+/// How the institution reports marks. It decides which boxes a roster and a
+/// criteria sheet ask for, so it is chosen once rather than guessed per row.
+enum GradingScale {
+  CGPA_10
+  CGPA_4
+  PERCENTAGE
+  BOTH
+}
+
+model Tenant {
+  id String @id @default(cuid())
+
+  name      String
+  /// What people actually call it - "SPPU", "MIT-WPU". Shown in the header.
+  shortName String?
+
+  /// The tenant's address on the platform: /t/<slug>. Lower case, stable, and
+  /// never reused, because it ends up in bookmarks and printed posters.
+  slug String     @unique
+  kind TenantKind @default(UNIVERSITY)
+
+  status TenantStatus @default(DRAFT)
+
+  legalName  String?
+  website    String?
+  logoUrl    String? @db.Text
+  /// The small icon in the browser tab. Either a link or an uploaded file
+  /// served from /api/files.
+  faviconUrl String? @db.Text
+  /// The one colour the tenant's portal is painted in. A hex string.
+  brandColor String  @default("#1d3b8b")
+  tagline    String?
+
+  city    String?
+  state   String?
+  address String? @db.Text
+  pincode String?
+
+  /// Who the platform team talks to at the institution. Not a login - the
+  /// people who sign in are invited separately, in the People step.
+  contactName  String?
+  contactEmail String?
+  contactPhone String?
+
+  // --- contact us
+  // What the institution publishes to its students and recruiters - the
+  // placement office's own desk, not the person we deal with above.
+  supportEmail    String?
+  supportPhone    String?
+  supportAltPhone String?
+  supportWhatsapp String?
+  /// "Mon-Fri, 10:00-17:30", as the institution writes it.
+  officeHours     String?
+
+  // --- academic defaults
+
+  gradingScale            GradingScale @default(CGPA_10)
+  /// 1-12. When the academic year turns over, which is when batches move up.
+  academicYearStartMonth  Int          @default(6)
+  /// Whether a drive starts with "one offer and you are out" switched on.
+  oneOfferDefault         Boolean      @default(true)
+  /// Whether batches may hand out a join code, or every student must be
+  /// entered by the placement cell.
+  allowSelfJoin           Boolean      @default(true)
+  /// Days a company has to move an application before it shows as overdue
+  /// to the student and the college (trust.tracker).
+  responseDays            Int          @default(7)
+  /// When on, a verified company must also be approved by this institution
+  /// before it can send roles to any of its colleges.
+  companyApprovalRequired Boolean      @default(false)
+  /// Whether a company that has registered but is not verified yet may sign
+  /// in. On, it gets in straight away and can only draft - it still reaches
+  /// no college until the platform verifies it. A company account is one
+  /// account for the whole platform, so this is a yes from one institution
+  /// being enough, not a gate each institution holds separately.
+  unverifiedCompanyAccess Boolean      @default(false)
+
+  // --- what they bought
+
+  /// STARTER, GROWTH, COMPLETE or CUSTOM. The preset the modules started from;
+  /// TenantModule rows are the truth about what is switched on.
+  plan String @default("STARTER")
+
+  // --- onboarding
+
+  /// Step keys the wizard has seen through, so it can resume where somebody
+  /// left off and the tenant list can show how far along each one is.
+  completedSteps Json      @default("[]")
+  launchedAt     DateTime?
+  createdById    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  colleges      College[]
+  batches       Batch[]
+  companyAccess TenantCompany[]
+  adminMembers  AdminMember[]
+  invites       Invite[]
+  modules       TenantModule[]
+  programs      TenantProgram[]
+  notices       Notice[]
+
+  @@index([status])
+}
+
+/// One module switched on or off for one tenant.
+///
+/// Rows rather than a JSON list so a query can ask "which tenants have
+/// assessments on" without parsing anything, and so each switch carries its
+/// own timestamp. The module catalogue itself lives in code
+/// (modules/tenants/catalogue.ts) - a module is software, not data.
+model TenantModule {
+  tenantId  String
+  moduleKey String
+  enabled   Boolean  @default(true)
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, moduleKey])
+}
+
+/// A course, and optionally a branch of it, that the tenant runs.
+///
+/// Courses stay one shared catalogue - a recruiter asking for "B.Tech" must
+/// mean the same thing at every university - and this is each tenant's
+/// selection from it. A row with no specialisation means the course as a
+/// whole; branch rows narrow it.
+model TenantProgram {
+  id               String  @id @default(cuid())
+  tenantId         String
+  courseId         String
+  specialisationId String?
+
+  tenant         Tenant          @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  course         Course          @relation(fields: [courseId], references: [id], onDelete: Cascade)
+  specialisation Specialisation? @relation(fields: [specialisationId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, courseId, specialisationId])
+  @@index([tenantId])
+}
+
+/// A course, and the branch of it, that one college actually runs.
+///
+/// The university's programmes (TenantProgram) are everything it offers
+/// across all its colleges; PICT runs a handful of them. This is that
+/// handful, and a student is placed in exactly one of them. A course with no
+/// branches at all (an MBA) has one row with no specialisation.
+model CollegeProgram {
+  id               String  @id @default(cuid())
+  collegeId        String
+  courseId         String
+  specialisationId String?
+  /// Sanctioned seats, so a report can say "placed 140 of 180".
+  intake           Int?
+
+  createdAt DateTime @default(now())
+
+  college        College         @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  course         Course          @relation(fields: [courseId], references: [id], onDelete: Restrict)
+  specialisation Specialisation? @relation(fields: [specialisationId], references: [id], onDelete: Restrict)
+  candidates     Candidate[]
+
+  @@unique([collegeId, courseId, specialisationId])
+  @@index([collegeId])
+  @@index([courseId])
+  @@index([specialisationId])
+}
+
+// ---------------------------------------------------------------------------
+// Institutions
+// ---------------------------------------------------------------------------
+
+model College {
+  id   String @id @default(cuid())
+  name String
+
+  /// The institution this college belongs to. Every row a campus owns reaches
+  /// a tenant through here, which is what keeps one tenant's data out of
+  /// another's screens.
+  tenantId String
+
+  /// The short form people actually use - PICT, VIT, COEP. Unique, and a far
+  /// better key than the full name, which gets typed inconsistently.
+  code String @unique
+
+  /// Chosen from the list operations maintains, rather than typed free-hand -
+  /// otherwise "Engineering", "engineering" and "Engg." all end up in the data
+  /// and nothing can be filtered reliably.
+  collegeTypeId String?
+
+  /// The university this college is affiliated to. Null means autonomous.
+  affiliation String?
+
+  city    String
+  state   String
+  address String? @db.Text
+  pincode String?
+
+  /// Recruiters filter on this when choosing which campuses to visit.
+  naacGrade String?
+
+  isVerified Boolean  @default(false)
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant       Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  collegeType  CollegeType?         @relation(fields: [collegeTypeId], references: [id])
+  members      CampusMember[]
+  batches      Batch[]
+  placements   Placement[]
+  candidates   Candidate[]
+  invites      Invite[]
+  assessments  Assessment[]
+  posts        Post[]
+  counselling  CounsellingRequest[]
+  campusDrives CampusDrive[]
+  programs     CollegeProgram[]
+
+  @@index([tenantId])
+  @@index([city])
+  @@index([collegeTypeId])
+}
+
+/// The kinds of institution on the platform - Engineering, Management,
+/// Pharmacy and so on. Operations maintains this list; a type that is in use
+/// cannot be deleted, only retired, so no college is ever left pointing at
+/// nothing.
+model CollegeType {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  colleges College[]
+}
+
+/// A named set of permissions, created and edited by operations.
+///
+/// Roles are data rather than an enum because who may do what is a decision
+/// each university makes for itself - one wants coordinators who can verify
+/// students, another does not. The permission catalogue is fixed in code; the
+/// bundles are not.
+///
+/// Students have no role. A candidate arrives on a college roster and their
+/// reach is their own record, so there is nothing here to grant them.
+model PlatformRole {
+  id String @id @default(cuid())
+
+  /// Stable identifier for the roles a deployment ships with, so they can be
+  /// found again after somebody renames them. Null for roles created here.
+  key String? @unique
+
+  name        String
+  description String? @db.Text
+
+  /// Which world this role belongs to. A role can never hold a permission
+  /// from outside its own scope, however it is edited.
+  scope RoleScope
+
+  /// Permission strings from the catalogue in permissions.ts.
+  permissions Json @default("[]")
+
+  /// Shipped with the platform: renameable, never deletable.
+  isSystem Boolean @default(false)
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  campusMembers  CampusMember[]
+  companyMembers CompanyMember[]
+  adminMembers   AdminMember[]
+  invites        Invite[]
+
+  @@unique([scope, name])
+  @@index([scope])
+}
+
+/// An operations account and what it may do.
+///
+/// The ADMIN account type used to be all-or-nothing. This is what lets a
+/// university have staff who onboard colleges without also being able to
+/// create other admins.
+model AdminMember {
+  id     String @id @default(cuid())
+  userId String @unique
+  roleId String
+
+  /// Which institution this person runs. Null means the platform team itself:
+  /// the people who onboard tenants, and who can step into any of them.
+  tenantId  String?
+  createdAt DateTime @default(now())
+
+  user   User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role   PlatformRole @relation(fields: [roleId], references: [id])
+  tenant Tenant?      @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([roleId])
+  @@index([tenantId])
+}
+
+model CampusMember {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  collegeId String
+  roleId    String
+  createdAt DateTime @default(now())
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  college College      @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  role    PlatformRole @relation(fields: [roleId], references: [id])
+
+  @@index([collegeId])
+}
+
+model Company {
+  id   String @id @default(cuid())
+  name String @unique // the brand students recognise: "Infosys", not the registered entity
+
+  // Who they actually are. A placement cell has to answer "is this real?" before
+  // it lets a recruiter near a batch, and these are the fields it answers with.
+  legalName     String?
+  /// What a company typed when its industry was not on the shared list. The
+  /// list stays the platform's to edit, so this is a suggestion: operations
+  /// either adds it or points the company at an industry already there.
+  industryOther String?
+  industryId    String?
+  sizeBand      CompanySize?
+  foundedYear   Int?
+  gstin         String? // 15 characters, the practical proof of an Indian entity
+  cin           String? // 21 characters, registered companies only
+
+  // Where to look them up.
+  website     String?
+  careersUrl  String?
+  linkedinUrl String?
+  logoUrl     String?
+  /// One line under the name: what they do, in the words they would use.
+  /// `about` is the paragraph; this is the sentence beside the logo.
+  headline    String?
+  about       String? @db.Text
+
+  /// The company page (showcase.company): in the company's own words.
+  whyJoin   String? @db.Text
+  howWeHire String? @db.Text
+
+  /// A banner across the top of their page.
+  coverUrl String?
+  /// Up to six pictures of the place and the work: [{ url, caption }].
+  /// Held as JSON because they are read and written as one list, never
+  /// queried across companies - a table would buy nothing and cost a join.
+  photos   Json    @default("[]")
+
+  // Where they are. Not the office a student visits - that is on the drive -
+  // but the head office, which is what a company profile shows.
+  city    String?
+  state   String?
+  address String? @db.Text
+  pincode String?
+
+  /// The gate. Only VERIFIED may publish a role, and every posting still needs
+  /// the college's own approval on top - so this decides who may speak, not who
+  /// gets heard.
+  status          CompanyStatus @default(PENDING)
+  appliedAt       DateTime? // set when a company signed itself up, null when operations created it
+  reviewedAt      DateTime?
+  reviewedById    String?
+  rejectionReason String?       @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  industry   Industry? @relation(fields: [industryId], references: [id])
+  reviewedBy User?     @relation("CompanyReviewer", fields: [reviewedById], references: [id])
+
+  members     CompanyMember[]
+  assessments Assessment[]
+  jobs        Job[]
+  invites     Invite[]
+  jobOptions  JobOption[]
+
+  simulations     Simulation[]
+  showcaseInvites ShowcaseInvite[]
+  posts           CompanyPost[]
+  campusDrives    CampusDrive[]
+
+  @@index([status])
+  @@index([industryId])
+}
+
+/// An update on a company's page: a hire, a product, a campus visit.
+///
+/// A page with only a profile on it goes stale the day it is written, and a
+/// student reading it a year later cannot tell. Posts are the part that shows
+/// a company is alive - written by the company, read by students and
+/// placement cells. Deliberately one-way: no likes, no comments, nothing that
+/// would turn a hiring platform into a place to be popular in.
+model CompanyPost {
+  id        String  @id @default(cuid())
+  companyId String
+  /// Whoever wrote it, kept for the company's own records. The page credits
+  /// the company, never the person - a recruiter who leaves should not have
+  /// their name on a page they can no longer correct.
+  authorId  String?
+  title     String?
+  /// Sanitised on the way in by modules/showcase/postHtml.ts. Nothing else
+  /// may write this column: what is stored is what a browser will render.
+  bodyHtml  String  @db.Text
+  /// Up to four: [{ kind: 'image' | 'video', url, caption }].
+  media     Json    @default("[]")
+
+  /// Null means a draft. Set once, when it is first published, so the page
+  /// can show when something was said rather than when it was last edited.
+  publishedAt DateTime?
+  /// At most one per company: the thing they want read first.
+  pinned      Boolean   @default(false)
+  /// Kept rather than deleted, so a page open in a student's browser does not
+  /// break under them, and so a company can be asked what it posted.
+  deletedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company Company @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  author  User?   @relation("CompanyPostAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([companyId, publishedAt])
+}
+
+/// A student telling their college something is wrong with a role - a fee
+/// demanded, a company that is not what it claims. The scam shield's human
+/// half: the college sees the report on the request, the platform team sees
+/// them all.
+model JobReport {
+  id           String          @id @default(cuid())
+  jobId        String
+  candidateId  String
+  collegeId    String?
+  reason       JobReportReason
+  note         String?         @db.Text
+  status       JobReportStatus @default(OPEN)
+  createdAt    DateTime        @default(now())
+  reviewedAt   DateTime?
+  reviewedById String?
+
+  job       Job       @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  /// One report per student per role; a second press updates the first.
+  @@unique([jobId, candidateId])
+  @@index([collegeId, status])
+}
+
+enum JobReportReason {
+  FEE_DEMANDED
+  FAKE_COMPANY
+  MISLEADING
+  OTHER
+}
+
+enum JobReportStatus {
+  OPEN
+  REVIEWED
+  DISMISSED
+}
+
+/// A student's answer on one use of their data (DPDP). Append-only: the
+/// latest row per purpose is the answer, and the rows before it are the
+/// history the law asks us to be able to show.
+model ConsentRecord {
+  id          String   @id @default(cuid())
+  candidateId String
+  purpose     String
+  granted     Boolean
+  createdAt   DateTime @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId, purpose, createdAt])
+}
+
+/// Admin-managed, exactly like CollegeType: the list grows without a deploy.
+/// The small vocabularies operations keeps, in one table.
+///
+/// Cities, states, NAAC grades, genders: lists with no relations of their own,
+/// where the only thing that matters is that everybody picks the same spelling.
+/// "Pune", "pune" and "PUNE" were three cities before this, and a filter that
+/// matched one of them missed the other two.
+///
+/// Courses, college types and industries stay in tables of their own - they
+/// carry relations, usage counts and, in the case of a course, branches - and
+/// flattening them into here would lose all of that.
+model RefValue {
+  id        String   @id @default(cuid())
+  kind      RefKind
+  value     String
+  isActive  Boolean  @default(true)
+  /// Where a list has a natural order that is not alphabetical, like a NAAC
+  /// grade running from A++ down to D.
+  position  Int      @default(0)
+  createdAt DateTime @default(now())
+
+  @@unique([kind, value])
+  @@index([kind, isActive])
+}
+
+enum RefKind {
+  CITY
+  STATE
+  NAAC_GRADE
+  GENDER
+}
+
+/// A course the university runs, kept by operations.
+///
+/// Course was free text on a batch, a student and a job, which meant a role
+/// asking for "B.E." and a roster recording "B.Tech" matched nobody and said
+/// nothing. The same treatment as CollegeType and Industry: operations keeps
+/// the list, everybody else picks from it.
+model Course {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  specialisations Specialisation[]
+  tenantPrograms  TenantProgram[]
+  collegePrograms CollegeProgram[]
+}
+
+/// A branch within a course - Computer Science inside B.Tech.
+///
+/// Held against its course where that is known, so the branch list can be
+/// narrowed to the course somebody already chose rather than offering every
+/// branch the university runs.
+model Specialisation {
+  id        String   @id @default(cuid())
+  /// Always the branch's own name, copied from Branch so every query that
+  /// matches on the name keeps working - and so it can never be misspelt.
+  name      String
+  courseId  String?
+  branchId  String
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  course          Course?          @relation(fields: [courseId], references: [id], onDelete: SetNull)
+  branch          Branch           @relation(fields: [branchId], references: [id], onDelete: Restrict)
+  tenantPrograms  TenantProgram[]
+  collegePrograms CollegeProgram[]
+
+  /// One branch of a given name per course; two would be one choice twice.
+  @@unique([name, courseId])
+  @@index([courseId])
+  @@index([branchId])
+}
+
+/// A branch, once, for the whole platform - "Computer Engineering".
+///
+/// Branches are defined here first and courses pick from them, so the same
+/// discipline is spelt the same way under B.Tech, M.Tech and every
+/// institution. A Specialisation is a branch as offered by one course.
+model Branch {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  specialisations Specialisation[]
+}
+
+model Industry {
+  id        String   @id @default(cuid())
+  name      String   @unique
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  companies Company[]
+}
+
+model CompanyMember {
+  id        String   @id @default(cuid())
+  userId    String   @unique
+  companyId String
+  roleId    String
+  createdAt DateTime @default(now())
+
+  user    User         @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  role    PlatformRole @relation(fields: [roleId], references: [id])
+
+  @@index([companyId])
+}
+
+// ---------------------------------------------------------------------------
+// Students
+// ---------------------------------------------------------------------------
+
+model Candidate {
+  id             String    @id @default(cuid())
+  userId         String    @unique
+  collegeId      String?
+  phone          String?
+  dateOfBirth    DateTime?
+  gender         String?
+  graduationYear Int?
+
+  /// The student's own course and branch, rather than their batch's.
+  ///
+  /// A batch may be "Second year", which says nothing about what anybody is
+  /// studying - so the two facts recruiters filter on live on the student,
+  /// where they are true regardless of how the college groups people.
+  course         String?
+  specialisation String?
+
+  headline  String?
+  about     String? @db.Text
+  resumeUrl String?
+
+  /// What the student chose the last time they built a resume here.
+  ///
+  /// Kept so coming back to change one line does not mean making every
+  /// choice again - which sections, in what order, which projects, the
+  /// summary they wrote. Null for a student who has only ever uploaded one.
+  resumeBuild Json?
+
+  resumes Resume[]
+
+  /// The three numbers every recruiter filters on, held once and verified by
+  /// the college, rather than inferred from the education list. This is how
+  /// placement cells actually work, and it makes eligibility a plain
+  /// column comparison instead of a guess about which row is "current".
+  cgpa       Decimal? @db.Decimal(4, 2)
+  /// Some universities award a percentage rather than a CGPA, and some award
+  /// both. Kept alongside rather than converted, because the conversion factor
+  /// differs by university and a guessed number is worse than none.
+  degreePct  Decimal? @db.Decimal(5, 2)
+  tenthPct   Decimal? @db.Decimal(5, 2)
+  twelfthPct Decimal? @db.Decimal(5, 2)
+
+  /// For somebody who joined in the second year through a diploma, this is
+  /// what a role should be reading instead of a 12th standard percentage they
+  /// were never going to have.
+  diplomaPct Decimal? @db.Decimal(5, 2)
+
+  /// The master's, for somebody already holding a degree.
+  ///
+  /// `cgpa` and `degreePct` are the bachelor's; these are the MCA, M.Tech or
+  /// MBA on top of it. Blank for the great majority of a campus roster, who
+  /// are on their first degree.
+  pgCgpa Decimal? @db.Decimal(4, 2)
+  pgPct  Decimal? @db.Decimal(5, 2)
+
+  /// Backlogs, split the way criteria sheets state them.
+  ///
+  /// `backlogs` is the total ever accumulated and `activeBacklogs` the ones
+  /// still outstanding. A criterion of "no live backlogs, at most two
+  /// cleared" needs both, and a college that only tracks one leaves the
+  /// other null - which fails any criterion that needs it, deliberately.
+  backlogs       Int?
+  activeBacklogs Int?
+
+  /// Years out of study. Not visible in a CGPA and asked for constantly.
+  gapYears Int?
+
+  /// Joined in the second year through a diploma. Companies split on whether
+  /// they take lateral entrants, so it is recorded rather than guessed.
+  isLateralEntry Boolean @default(false)
+
+  /// The student's side of what a role already says about disability.
+  ///
+  /// A role states the groups it suits and the support it offers, in keys
+  /// from jobs/inclusion.ts. Without the same keys here that was a promise
+  /// made into the air: nothing could tell a student the role was written
+  /// for them, and nothing could tell a company its offer had been taken up.
+  /// Declaring is optional and stays the student's own - no bar reads it.
+  isPwd          Boolean @default(false)
+  /// Keys from PWD_CATEGORIES, the RPwD Act 2016 groups.
+  pwdCategories  Json?
+  /// The percentage on the UDID certificate. Reservation and most employer
+  /// schemes are stated in it, so a student who has one should not have to
+  /// produce it again later.
+  pwdPct         Int?
+  /// The support they need, as keys from ACCOMMODATIONS - the same list a
+  /// role offers from, so the two can be compared rather than read.
+  accommodations Json?
+
+  /// What they will actually take.
+  ///
+  /// Every one of these is on a role already - relocation, shift and travel -
+  /// and a student who finds out at the offer stage that the job is in
+  /// another city on nights has wasted everybody's season. Null means they
+  /// have not said, which is not the same as no.
+  openToRelocate   Boolean?
+  openToNightShift Boolean?
+  /// NONE, OCCASIONAL or FREQUENT - the values a role states in TRAVEL.
+  openToTravel     String?
+
+  /// The university's permanent registration number - SPPU issues a PRN, other
+  /// universities call it an enrolment number. Distinct from a roll number,
+  /// which belongs to the college and can change between years.
+  prn String? @unique
+
+  /// Which of its college's programmes the student is in - the Map data
+  /// link. `course` and `specialisation` above are kept in step with it,
+  /// because every eligibility check reads them as plain names. Null means
+  /// the student has not been mapped yet.
+  collegeProgramId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  college          College?          @relation(fields: [collegeId], references: [id], onDelete: SetNull)
+  collegeProgram   CollegeProgram?   @relation(fields: [collegeProgramId], references: [id], onDelete: SetNull)
+  educations       Education[]
+  experiences      Experience[]
+  projects         Project[]
+  skills           CandidateSkill[]
+  batchMemberships BatchMembership[]
+  applications     Application[]
+  jobReports       JobReport[]
+  consents         ConsentRecord[]
+
+  // Phase 2
+  internships          Internship[]
+  readinessChecks      ReadinessCheck[]
+  aptitudeAttempts     AptitudeAttempt[]
+  mockSessions         MockInterviewSession[]
+  simulationEnrolments SimulationEnrolment[]
+  stories              CampusStory[]
+  showcase             ShowcaseProfile?
+  showcaseInvites      ShowcaseInvite[]
+  driveCheckIns        DriveCheckIn[]
+
+  // Phase 3
+  processRatings     ProcessRating[]
+  assessments        AssessmentAssignment[]
+  counselling        CounsellingRequest[]
+  gdSessions         GdSession[]
+  wellbeing          WellbeingEntry[]
+  softSkills         SoftSkillAttempt[]
+  microApplications  MicroApplication[]
+  alumniProfile      AlumniProfile?
+  driveRegistrations CampusDriveRegistration[]
+
+  @@index([collegeId])
+  @@index([collegeProgramId])
+}
+
+model Education {
+  id          String   @id @default(cuid())
+  candidateId String
+  degree      String
+  institution String
+  board       String?
+  startYear   Int
+  endYear     Int?
+  cgpa        Decimal? @db.Decimal(4, 2)
+  percentage  Decimal? @db.Decimal(5, 2)
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId])
+}
+
+model Experience {
+  id           String    @id @default(cuid())
+  candidateId  String
+  title        String
+  organisation String
+  location     String?
+  startDate    DateTime
+  endDate      DateTime?
+  isCurrent    Boolean   @default(false)
+  description  String?   @db.Text
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId])
+}
+
+model Project {
+  id          String  @id @default(cuid())
+  candidateId String
+  title       String
+  description String? @db.Text
+
+  /// Where the work can be seen, as a list.
+  ///
+  /// One project is routinely several places - the repository, a live demo,
+  /// a write-up, a video of it running - and a single column made a student
+  /// choose which one a recruiter got to see. Held as JSON rather than a
+  /// table of its own because it is only ever read with its project, the
+  /// same reasoning as a company's photographs.
+  links Json @default("[]")
+
+  startDate DateTime?
+  endDate   DateTime?
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId])
+}
+
+/// A resume a student keeps, built here or uploaded.
+///
+/// Kept as rows rather than one column because a student applying for two
+/// different kinds of role writes two different resumes, and the portal was
+/// overwriting the first with the second - leaving the file on disk with
+/// nothing pointing at it. `Candidate.resumeUrl` still names the one in use,
+/// so everything that reads a resume keeps reading one field.
+model Resume {
+  id          String       @id @default(cuid())
+  candidateId String
+  /// Theirs to set: "Backend roles", "Data analyst". Never blank.
+  name        String
+  /// The stored address, which is what `Candidate.resumeUrl` points at.
+  url         String
+  source      ResumeSource
+  /// The choices that produced it, for a built one. Null for an upload,
+  /// which has no choices to remember.
+  build       Json?
+  createdAt   DateTime     @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId])
+}
+
+enum ResumeSource {
+  BUILT
+  UPLOADED
+}
+
+model Skill {
+  id         String           @id @default(cuid())
+  name       String           @unique
+  candidates CandidateSkill[]
+  jobs       JobSkill[]
+}
+
+model CandidateSkill {
+  candidateId String
+  skillId     String
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  skill     Skill     @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([candidateId, skillId])
+}
+
+// ---------------------------------------------------------------------------
+// Campus structure
+// ---------------------------------------------------------------------------
+
+/// A group of students the college wants to treat together.
+///
+/// Deliberately loose. A batch might be a degree cohort ("B.Tech CSE 2026"),
+/// a year group ("Second year"), a whole department ("Mechanical"), or one
+/// the placement cell invented for a single drive ("Aptitude cleared").
+/// Only the name is required, and the college chooses it.
+///
+/// The optional fields below are defaults, not definitions: setting a course
+/// on a batch fills that course in for students added through it, and nothing
+/// more. Eligibility reads the student's own record.
+model Batch {
+  id String @id @default(cuid())
+
+  /// Null means the batch belongs to the university rather than to one
+  /// college - "First year", say, spanning every affiliated college. Only
+  /// operations creates those; a college's own batches always carry its id.
+  collegeId String?
+
+  /// Always set, including on a college's own batches, so that a
+  /// university-wide batch - which has no college to reach a tenant through -
+  /// is still fenced into its institution.
+  tenantId String
+
+  name           String
+  course         String?
+  specialisation String?
+  graduationYear Int?
+
+  /// Where the group is in the degree - 1 for first year, 2 for second. Kept
+  /// apart from graduationYear because a "second year" batch stays the second
+  /// year while the students in it change, whereas a graduating-year batch is
+  /// the same people throughout.
+  studyYear Int?
+
+  headOfDept String?
+
+  /// A shareable code that lets a student join this batch themselves. Unlike an
+  /// invite token this is meant to be seen and circulated by the placement cell,
+  /// so it is stored in the clear - it is a shared secret like a meeting link,
+  /// not a per-person credential. It can be turned off or rotated at any time.
+  joinCode        String? @unique
+  joinCodeEnabled Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  college     College?          @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  tenant      Tenant            @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  memberships BatchMembership[]
+  placements  Placement[]       @relation("PlacementBatches")
+  invites     Invite[]
+  jobPostings JobPostingBatch[]
+
+  /// Unique on the name alone: the college names its own batches, and two
+  /// groups it calls the same thing are the same group.
+  @@unique([collegeId, name])
+  @@index([collegeId])
+  @@index([tenantId])
+}
+
+/// Join table, and the home of Freeze.
+/// Frozen means the college has verified the record: it blocks candidate-side
+/// edits AND it is what makes the student eligible to apply.
+model BatchMembership {
+  id          String    @id @default(cuid())
+  batchId     String
+  candidateId String
+  rollNo      String?
+  /// A, B, C… Larger batches are taught in divisions, and placement cells
+  /// schedule drives around them.
+  division    String?
+  isFrozen    Boolean   @default(false)
+  verifiedAt  DateTime?
+  joinedAt    DateTime  @default(now())
+
+  batch     Batch     @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([batchId, candidateId])
+  @@unique([batchId, rollNo])
+  @@index([candidateId])
+}
+
+/// A drive - "2026 Final Placements". The campus reporting unit, and the
+/// boundary within which the one-offer rule applies.
+model Placement {
+  id           String        @id @default(cuid())
+  collegeId    String
+  name         String
+  type         PlacementType @default(FINAL)
+  year         Int
+  isOpen       Boolean       @default(true)
+  oneOfferRule Boolean       @default(true)
+  createdAt    DateTime      @default(now())
+  updatedAt    DateTime      @updatedAt
+
+  college      College       @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  batches      Batch[]       @relation("PlacementBatches")
+  jobPostings  JobPosting[]
+  applications Application[]
+  campusDrives CampusDrive[]
+
+  @@unique([collegeId, name, year])
+  @@index([collegeId])
+}
+
+// ---------------------------------------------------------------------------
+// Jobs
+// ---------------------------------------------------------------------------
+
+model Job {
+  id               String  @id @default(cuid())
+  companyId        String
+  createdById      String
+  title            String
+  description      String  @db.Text
+  responsibilities String? @db.Text
+  /// What is being offered. An open list like the others, but with a
+  /// difference: the form and the server both change behaviour based on it,
+  /// so a choice here carries the two traits that decide what else is asked
+  /// for. See JobOption.paysStipend and convertsToPpo.
+  jobType          String  @default("FULL_TIME")
+  /// An open vocabulary, held as text rather than as a database enum.
+  ///
+  /// Nothing in the code branches on it - it is a label a person reads - so a
+  /// company that hires "field-based" should not need a migration to say so.
+  /// What may be chosen comes from JobOption, which a company can add to; the
+  /// column keeps whatever was chosen.
+  ///
+  /// Employment type is deliberately not one of these: stipends, internship
+  /// length and pre-placement offers are all decided by it, so a value the
+  /// code has never heard of would silently lose those fields.
+  workMode         String?
+
+  /// The city, plainly. Typed rather than picked from a list: an address is
+  /// one thing a person writes in one go, and making them assemble it from a
+  /// dropdown and two boxes is slower without being any more accurate.
+  location String?
+
+  /// Where exactly, for a role that has one office rather than a city.
+  ///
+  /// The cities above are what a student filters and decides on; this is what
+  /// they put into a maps app the morning they have to turn up. Optional,
+  /// because plenty of roles are "Pune" and nothing more definite yet.
+  addressLine String? @db.Text
+  pincode     String?
+
+  /// The two links a maps app gives you, pasted rather than looked up.
+  ///
+  /// A geocoder guesses from text and is sometimes wrong in ways nobody
+  /// notices; a link copied off the map is the exact pin somebody chose. The
+  /// share link drives "open in maps" and directions, and the embed link
+  /// drives the preview - Google hands out both from the same Share menu.
+  mapsLink    String? @db.Text
+  mapEmbedUrl String? @db.Text
+
+  /// How many people they are actually hiring.
+  ///
+  /// The first thing a placement cell asks and the first thing a student uses
+  /// to judge their odds. Null means the company would not say, which is
+  /// itself worth showing rather than hiding behind a zero.
+  openings Int?
+
+  /// The advertised range - the headline number on the poster.
+  ///
+  /// Always per year, whatever the recruiter typed. A placement report adds
+  /// these up and compares them, so there has to be one unit; `payPeriod`
+  /// remembers how it was stated so it can be shown back the same way.
+  ctcMin Decimal? @db.Decimal(12, 2)
+  ctcMax Decimal? @db.Decimal(12, 2)
+
+  /// Whether the pay was quoted per year or per month.
+  ///
+  /// Plenty of campus roles are advertised as a monthly figure, and a
+  /// recruiter made to convert it by hand will sooner or later slip a zero.
+  payPeriod String @default("YEARLY")
+
+  /// What the headline is actually made of.
+  ///
+  /// "12 LPA" is routinely 7 fixed, 3 variable and a joining bonus, and a
+  /// college publishes the fixed figure in its placement report. Held apart
+  /// so the report is right and so a student can compare two offers honestly.
+  ctcFixed     Decimal? @db.Decimal(12, 2)
+  ctcVariable  Decimal? @db.Decimal(12, 2)
+  joiningBonus Decimal? @db.Decimal(12, 2)
+
+  /// An internship is paid monthly and measured in months, and the question
+  /// every student asks is whether it turns into a job.
+  stipendPerMonth  Decimal? @db.Decimal(10, 2)
+  internshipMonths Int?
+  ppoCtc           Decimal? @db.Decimal(12, 2)
+
+  /// A bond is a number of months and a rupee figure. One without the other
+  /// tells a student nothing about what they would be signing.
+  bondMonths Int?
+  bondAmount Decimal? @db.Decimal(12, 2)
+  /// What actually triggers the bond, in the company's own words. Months and
+  /// a figure say what it costs; this says when it costs it.
+  bondNote   String?  @db.Text
+
+  /// A test the company wants taken before anybody applies.
+  ///
+  /// Not a round: rounds happen to people who have applied, and this happens
+  /// before. It is hosted wherever the company already hosts it - the portal
+  /// carries the link, the instructions and the deadline, and records what the
+  /// student reports back, rather than pretending to be an assessment engine.
+  screeningTestName         String?
+  screeningTestUrl          String?   @db.Text
+  screeningTestInstructions String?   @db.Text
+  screeningTestDeadline     DateTime?
+  /// Whether it gates applying, or is merely offered.
+  screeningTestRequired     Boolean   @default(false)
+
+  deadline    DateTime
+  /// When they would start. Distinct from the deadline to apply, and the
+  /// thing a final-year student plans the rest of their year around.
+  joiningFrom DateTime?
+
+  status      JobStatus @default(DRAFT)
+  publishedAt DateTime?
+
+  // Eligibility criteria - kept as columns so the visibility query stays a
+  // single SQL statement rather than a post-filter in application code.
+  /// The aggregate bar, statable in either unit.
+  ///
+  /// "7.0 CGPA or 70%" is one requirement written two ways, and a company
+  /// whose standard is a percentage could not write it down at all while only
+  /// a CGPA existed here. A student clears the gate on whichever of the two
+  /// their college actually records - the conversion between them differs by
+  /// university, so guessing one from the other is worse than accepting both.
+  minCgpa      Decimal? @db.Decimal(4, 2)
+  minDegreePct Decimal? @db.Decimal(5, 2)
+
+  minTenthPct   Decimal? @db.Decimal(5, 2)
+  minTwelfthPct Decimal? @db.Decimal(5, 2)
+
+  /// The master's, for a role aimed at MCA, M.Tech or MBA students.
+  ///
+  /// Their bachelor's is the graduation bar above; this is the degree they
+  /// are actually on. A criteria sheet for an MCA drive routinely asks for
+  /// both, and one number could not hold them.
+  minPgCgpa Decimal? @db.Decimal(4, 2)
+  minPgPct  Decimal? @db.Decimal(5, 2)
+
+  /// What stands in for the 12th for somebody who came through a diploma.
+  ///
+  /// Without it, a role that ticks "lateral entry may apply" and then sets a
+  /// 12th bar excludes every lateral entrant it just invited - they have no
+  /// 12th standard marks at all.
+  minDiplomaPct Decimal? @db.Decimal(5, 2)
+
+  /// Better than the bar, rather than instead of it.
+  ///
+  /// "Eligibility 6.0, preference to 8.0+" is how a recruiter actually thinks,
+  /// and one number cannot say it: set it high and the good candidate who had
+  /// a bad second year never appears; set it low and there are four hundred
+  /// applications to read. This one sorts the list instead of gating it.
+  preferredCgpa      Decimal? @db.Decimal(4, 2)
+  preferredDegreePct Decimal? @db.Decimal(5, 2)
+
+  /// Backlogs, as placement cells actually state them: "no live backlogs, at
+  /// most two cleared". One number could not say that, and the two are
+  /// routinely different criteria in the same sentence.
+  maxBacklogs       Int?
+  maxActiveBacklogs Int?
+
+  /// A break in study. Standard on an Indian campus criteria sheet, and
+  /// invisible in a CGPA.
+  maxGapYears Int?
+
+  /// Said out loud: this role has no marks bar at all.
+  ///
+  /// Blank criteria already mean "do not filter on it", but blank cannot tell
+  /// a recruiter who decided the role is open to everyone from one who has not
+  /// got to that step yet. Both the editor and the student's card were left
+  /// guessing, so the decision is stored rather than inferred. Every bar above
+  /// is cleared when this is on, so the two can never disagree.
+  openToAll Boolean @default(false)
+
+  /// Whether someone who joined in the second year through a diploma counts.
+  /// Companies split on it, so it is asked rather than assumed.
+  allowsLateralEntry Boolean @default(true)
+
+  /// Who the role is open to by gender. ANY (default), WOMEN_PREFERRED
+  /// (says so, excludes nobody), WOMEN or MEN (enforced: others cannot see
+  /// the role). A restriction needs `genderNote`, which the college reads
+  /// before it accepts the request.
+  genderEligibility String  @default("ANY")
+  genderNote        String? @db.Text
+
+  /// Whether the role suits a person with a disability: YES, NO, or null
+  /// for not assessed. Informational - nobody is filtered on it, because
+  /// the portal holds no disability data about students.
+  pwdSuitable    String?
+  /// Keys from the RPwD Act 2016 groups the role suits (see inclusion.ts).
+  pwdCategories  Json?
+  /// Support offered, as keys (see inclusion.ts), and anything else in words.
+  accommodations Json?
+  inclusionNote  String? @db.Text
+
+  /// Working conditions a student should know before applying.
+  shift              String?
+  travel             String?
+  relocationRequired Boolean @default(false)
+  /// Asked only for night shifts: transport and safety, which Maharashtra
+  /// law requires for women working at night.
+  nightShiftSafety   String? @db.Text
+
+  /// The title on the offer letter, which is often not the posting's title.
+  designation String?
+  /// The industry, from the list operations keeps - read by sector-wise
+  /// placement reports (NIRF, NAAC).
+  sector      String?
+
+  /// Who actually employs the student: DIRECT, SUBSIDIARY or THIRD_PARTY
+  /// (a staffing agency's payroll). Required to publish.
+  employerType String?
+  employerName String?
+
+  /// What happens between the offer and a full salary.
+  probationMonths  Int?
+  /// Yearly, if pay during probation differs from the CTC.
+  probationCtc     Decimal? @db.Decimal(12, 2)
+  trainingMonths   Int?
+  trainingLocation String?
+  trainingStipend  Decimal? @db.Decimal(10, 2)
+  /// What the CTC figure contains, as keys (see offerTerms.ts).
+  ctcIncludes      Json?
+  ctcNote          String?  @db.Text
+
+  /// The offer itself: how soon results and the letter follow.
+  resultDays         Int?
+  offerLetterDays    Int?
+  /// YES or NO. Required to publish, so an offer never turns out to have
+  /// had conditions nobody mentioned.
+  offerConditional   String?
+  offerConditions    Json?
+  offerConditionNote String? @db.Text
+
+  /// The recruiter's declaration that no fee is charged at any stage,
+  /// made on the publish step and required to publish.
+  noFeeDeclaredAt   DateTime?
+  noFeeDeclaredById String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company         Company             @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy       User                @relation("JobCreator", fields: [createdById], references: [id])
+  rounds          Round[]
+  postings        JobPosting[]
+  applications    Application[]
+  courses         JobCourse[]
+  terms           JobTerm[]
+  specialisations JobSpecialisation[]
+  gradYears       JobGradYear[]
+  skills          JobSkill[]
+  team            JobTeamMember[]
+  reports         JobReport[]
+  campusDrives    CampusDriveJob[]
+
+  @@index([companyId])
+  @@index([status, deadline])
+}
+
+/// The courses a job is open to. Empty means "any course".
+///
+/// MySQL has no array column type, so this is a join table rather than a JSON
+/// blob - which keeps eligibility a filter the database can evaluate, instead
+/// of something application code has to post-process.
+model JobCourse {
+  jobId  String
+  course String
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, course])
+  @@index([course])
+}
+
+/// The graduating years a job is open to. Empty means "any year".
+/// What a dropdown offers, where the dropdown is allowed to grow.
+///
+/// The same shape as CollegeType and Industry, which this portal already uses
+/// for lists operations can extend - except these belong to a company. One
+/// recruiter inventing "Machine test" should not put it in front of every
+/// other company on the platform, so a row with a companyId is theirs alone
+/// and a row without one ships with the product.
+model JobOption {
+  id        String        @id @default(cuid())
+  kind      JobOptionKind
+  /// What is stored on the job or round. Stable; the label may be renamed.
+  value     String
+  /// What a person reads.
+  label     String
+  companyId String?
+  isActive  Boolean       @default(true)
+  createdAt DateTime      @default(now())
+
+  /// What an employment type does, rather than what it is called.
+  ///
+  /// The job form cannot ask for a stipend unless it knows the thing is paid
+  /// monthly, and cannot ask what it converts to unless it knows it converts.
+  /// Hard-coding that against four known names is what kept this list closed;
+  /// asking the person adding one is what opens it.
+  ///
+  /// Meaningless for the other kinds, which are labels and nothing more.
+  paysStipend   Boolean @default(false)
+  convertsToPpo Boolean @default(false)
+
+  company Company? @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  /// One meaning per company: two "Machine test" rows would be two identical
+  /// choices in the same dropdown.
+  @@unique([kind, value, companyId])
+  @@index([kind, companyId])
+}
+
+enum JobOptionKind {
+  EMPLOYMENT_TYPE
+  WORK_MODE
+  ROUND_TYPE
+  ROUND_MODE
+}
+
+/// Which batches inside a drive a posting is aimed at.
+///
+/// No rows means the whole drive, the same convention the eligibility lists
+/// use - so a role that never thought about batches reaches everybody, and
+/// one that did reaches exactly who it named.
+///
+/// It hangs off the posting rather than the job because a batch belongs to a
+/// drive, and a job may go to several drives at several colleges. Narrowing
+/// at PICT says nothing about what should happen at VIT.
+model JobPostingBatch {
+  postingId String
+  batchId   String
+
+  posting JobPosting @relation(fields: [postingId], references: [id], onDelete: Cascade)
+  batch   Batch      @relation(fields: [batchId], references: [id], onDelete: Cascade)
+
+  @@id([postingId, batchId])
+  @@index([batchId])
+}
+
+/// A condition of the role that is not open to discussion.
+///
+/// Relocation, a bond, a shift pattern, a service agreement: the things a
+/// student finds out about in the last round today, and the reason offers get
+/// declined in December. Stated once, shown before anybody applies, and
+/// acknowledged on the application itself so nobody can say they were not told.
+model JobTerm {
+  id    String @id @default(cuid())
+  jobId String
+  order Int
+  text  String @db.Text
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, order])
+  @@index([jobId])
+}
+
+/// The branches a role is open to, within a course.
+///
+/// "B.Tech" is not a criterion; "B.Tech CSE and IT, not Civil" is. Separate
+/// from JobCourse because the two filter independently - a role can take any
+/// branch of B.Tech, or Computer Science from every course that has one.
+model JobSpecialisation {
+  jobId          String
+  specialisation String
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, specialisation])
+  @@index([specialisation])
+}
+
+/// What the role is looking for, from the same list students pick from.
+///
+/// A join to Skill rather than free text, so "Node.js" on a job and "Node.js"
+/// on a student are the same row and can actually be matched.
+model JobSkill {
+  jobId   String
+  skillId String
+
+  /// Asked for, rather than merely welcomed.
+  ///
+  /// It does not hide the role: a campus roster is half-filled at the best of
+  /// times, and refusing somebody because they never listed Java would lose
+  /// good people to an empty profile field. It sorts the applicants instead,
+  /// which is where choosing actually happens.
+  isRequired Boolean @default(false)
+
+  job   Job   @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  skill Skill @relation(fields: [skillId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, skillId])
+  @@index([skillId])
+}
+
+/// Who at the company is running this particular hire.
+///
+/// The manual's fourth section. Without it every member of a company sees
+/// every role, which stops being reasonable the moment a company runs two
+/// unrelated drives with different interview panels.
+model JobTeamMember {
+  jobId   String
+  userId  String
+  addedAt DateTime @default(now())
+
+  job  Job  @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  user User @relation("JobTeam", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, userId])
+  @@index([userId])
+}
+
+model JobGradYear {
+  jobId String
+  year  Int
+
+  job Job @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@id([jobId, year])
+  @@index([year])
+}
+
+/// An ordered gate in the hiring process.
+/// config holds type-specific settings - for RESUME_SCREEN that is which
+/// profile sections are required; for a future WORK_SIMULATION it is the task
+/// list. This is the one place a document shape genuinely earns its keep.
+model Round {
+  id            String  @id @default(cuid())
+  jobId         String
+  order         Int
+  name          String
+  type          String  @default("RESUME_SCREEN")
+  isElimination Boolean @default(true)
+  config        Json    @default("{}")
+
+  /// What actually happens in this round.
+  ///
+  /// The name says which round it is; this says what sitting in it is like -
+  /// how long, how many questions, how many interviewers, what to bring. It
+  /// is the difference between a student knowing there is a technical round
+  /// and a student knowing how to prepare for one.
+  description String? @db.Text
+
+  /// Roughly how many go through, where the company will say.
+  ///
+  /// Two hundred students sitting an aptitude test all know somebody is going
+  /// to be cut; being told it is fifty is kinder than leaving them to guess.
+  shortlistCount Int?
+
+  /// Whether a student turns up somewhere or opens a link.
+  ///
+  /// The one thing they need to know a week ahead, because the answer decides
+  /// whether they book a train. Its own flag rather than something read off
+  /// the mode label, which a company may rename or invent.
+  isOnline Boolean @default(false)
+
+  /// Where to be, for a round somebody attends.
+  addressLine String? @db.Text
+  pincode     String?
+  mapsLink    String? @db.Text
+  mapEmbedUrl String? @db.Text
+
+  /// Where to join, for a round somebody does not.
+  meetingLink String? @db.Text
+
+  /// When it happens and where.
+  ///
+  /// A campus drive is a date in a college's calendar before it is anything
+  /// else: the placement cell books a hall, tells a batch to be there, and
+  /// cannot do either from a round that only has a name.
+  scheduledAt DateTime?
+  durationMin Int?
+  mode        String?
+  venue       String?
+
+  job          Job           @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  results      RoundResult[]
+  applications Application[] @relation("CurrentRound")
+
+  @@unique([jobId, order])
+  @@index([jobId])
+}
+
+/// One job's presence at one college's drive, plus that college's approval
+/// decision. A student sees a job only through an ACCEPTED posting.
+model JobPosting {
+  id            String        @id @default(cuid())
+  jobId         String
+  placementId   String
+  status        PostingStatus @default(PENDING)
+  decidedById   String?
+  decidedAt     DateTime?
+  declineReason String?       @db.Text
+  createdAt     DateTime      @default(now())
+
+  job       Job               @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  placement Placement         @relation(fields: [placementId], references: [id], onDelete: Cascade)
+  decidedBy User?             @relation("PostingDecider", fields: [decidedById], references: [id])
+  batches   JobPostingBatch[]
+
+  @@unique([jobId, placementId])
+  @@index([placementId, status])
+}
+
+// ---------------------------------------------------------------------------
+// The pipeline
+// ---------------------------------------------------------------------------
+
+model Application {
+  id          String            @id @default(cuid())
+  candidateId String
+  jobId       String
+  /// Denormalised from the posting so the one-offer cascade is one indexed query.
+  placementId String
+  status      ApplicationStatus @default(APPLIED)
+
+  /// The resume as it was sent, frozen at the moment of applying.
+  ///
+  /// A student may keep several and change which is current; a recruiter must
+  /// still open the one they were actually sent. Reading the candidate's
+  /// current resume meant an application quietly changed what it carried
+  /// whenever the student switched theirs. Null for applications made before
+  /// this was recorded, which fall back to the current one.
+  resumeUrl      String?
+  currentRoundId String?
+  appliedAt      DateTime @default(now())
+
+  /// When the student accepted the role's non-negotiable terms. Null only on
+  /// applications made before a role had any.
+  acceptedTermsAt DateTime?
+  /// What the student reported back from the pre-application test - a score,
+  /// a submission id, whatever the company asked them to bring.
+  screeningRef    String?
+  updatedAt       DateTime  @updatedAt
+
+  candidate    Candidate              @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  job          Job                    @relation(fields: [jobId], references: [id], onDelete: Cascade)
+  placement    Placement              @relation(fields: [placementId], references: [id], onDelete: Cascade)
+  currentRound Round?                 @relation("CurrentRound", fields: [currentRoundId], references: [id])
+  results      RoundResult[]
+  events       StatusEvent[]
+  assessments  AssessmentAssignment[]
+
+  @@unique([candidateId, jobId])
+  @@index([jobId, status])
+  @@index([candidateId, placementId, status])
+}
+
+model RoundResult {
+  id            String       @id @default(cuid())
+  applicationId String
+  roundId       String
+  outcome       RoundOutcome @default(PENDING)
+  score         Decimal?     @db.Decimal(6, 2)
+  feedback      String?      @db.Text
+  evaluatedById String?
+  evaluatedAt   DateTime?
+  createdAt     DateTime     @default(now())
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  round       Round       @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  evaluatedBy User?       @relation("RoundEvaluator", fields: [evaluatedById], references: [id])
+
+  @@unique([applicationId, roundId])
+  @@index([applicationId])
+}
+
+/// Append-only audit trail. Never updated, never deleted.
+/// reason distinguishes causes that share a state - an application withdrawn
+/// as "auto_placed" is very different from one the student abandoned.
+model StatusEvent {
+  id            String             @id @default(cuid())
+  applicationId String
+  actorId       String?
+  fromStatus    ApplicationStatus?
+  toStatus      ApplicationStatus
+  note          String?            @db.Text
+  reason        String?
+  createdAt     DateTime           @default(now())
+
+  application Application @relation(fields: [applicationId], references: [id], onDelete: Cascade)
+  actor       User?       @relation("StatusEventActor", fields: [actorId], references: [id])
+
+  @@index([applicationId, createdAt])
+}
+
+// ---------------------------------------------------------------------------
+// Supporting
+// ---------------------------------------------------------------------------
+
+/// A notice from the institution, posted by operations and shown to whoever it
+/// is addressed to.
+///
+/// Who it reaches is three booleans rather than a list, because MySQL has no
+/// scalar arrays in Prisma and a join table for three fixed options would be
+/// three tables of ceremony for one question. All three true is "everybody",
+/// and at least one must be true - a notice addressed to nobody is not a
+/// notice, and the API refuses it.
+///
+/// Reach is not symmetrical, and cannot be:
+///
+///   students and colleges belong to the institution, so they are reached
+///   through the tenant like every other campus row;
+///
+///   companies do not. A company is shared by the whole platform, so a
+///   university broadcasting to "companies" can only honestly mean the ones
+///   that have actually posted a role to one of its drives. Anything wider
+///   would be one institution mailing the entire marketplace.
+/// Where a college-invited drive has got to.
+///
+/// The college drafts it, invites the company, and nothing is shown to a
+/// student until the company has agreed and a time and place exist. DECLINED
+/// is an end state with a reason on it, because "they said no" and "nobody
+/// ever replied" are different things to a placement cell.
+enum CampusDriveStatus {
+  DRAFT
+  INVITED
+  ACCEPTED
+  SCHEDULED
+  OPEN
+  CLOSED
+  DECLINED
+}
+
+/// A company's visit, invited by the college.
+///
+/// The other way round from a JobPosting, and both are kept. A JobPosting is
+/// the recruiter knocking: the company builds a role, aims it at colleges, and
+/// each college accepts or declines. A CampusDrive is the college knocking:
+/// the cell drafts the visit and the roles it wants, invites the company, and
+/// the company is the one that agrees.
+///
+/// They converge. Whichever way it started, students end up applying to a Job
+/// and walking through Rounds, so the pipeline, the state machine and the
+/// one-offer cascade are untouched by any of this.
+///
+/// The criteria held here are for the eligibility report only - the numbers a
+/// company is shown before it agrees to come. They are not what gates an
+/// application: that is still the Job's own criteria, checked in
+/// jobs/visibility.ts. Two sets of numbers that must agree would drift; these
+/// answer "is this campus worth a day", the Job's answer "may this student
+/// apply".
+model CampusDrive {
+  id          String            @id @default(cuid())
+  collegeId   String
+  placementId String
+  companyId   String
+  status      CampusDriveStatus @default(DRAFT)
+
+  title String
+  /// What the cell tells the company about the visit.
+  pitch String? @db.Text
+
+  /// Set by the college once the company has agreed.
+  scheduledAt DateTime?
+  addressLine String?   @db.Text
+  meetingLink String?   @db.Text
+
+  /// The company's bar, for the report it is shown before agreeing.
+  ///
+  /// Null on a new drive and set by the company on its invitation. Never by
+  /// the college: a college does not tell a recruiter who it may consider.
+  minCgpa           Decimal? @db.Decimal(4, 2)
+  minDegreePct      Decimal? @db.Decimal(5, 2)
+  maxBacklogs       Int?
+  maxActiveBacklogs Int?
+
+  invitedAt     DateTime?
+  respondedAt   DateTime?
+  openedAt      DateTime?
+  closedAt      DateTime?
+  declineReason String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  college       College                   @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  placement     Placement                 @relation(fields: [placementId], references: [id], onDelete: Cascade)
+  company       Company                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  courses       CampusDriveCourse[]
+  branches      CampusDriveBranch[]
+  gradYears     CampusDriveGradYear[]
+  jobs          CampusDriveJob[]
+  registrations CampusDriveRegistration[]
+
+  @@index([collegeId, status])
+  @@index([companyId, status])
+  @@index([placementId])
+}
+
+model CampusDriveCourse {
+  driveId String
+  course  String
+
+  drive CampusDrive @relation(fields: [driveId], references: [id], onDelete: Cascade)
+
+  @@id([driveId, course])
+}
+
+model CampusDriveBranch {
+  driveId        String
+  specialisation String
+
+  drive CampusDrive @relation(fields: [driveId], references: [id], onDelete: Cascade)
+
+  @@id([driveId, specialisation])
+}
+
+model CampusDriveGradYear {
+  driveId String
+  year    Int
+
+  drive CampusDrive @relation(fields: [driveId], references: [id], onDelete: Cascade)
+
+  @@id([driveId, year])
+}
+
+/// The roles being offered at the visit.
+///
+/// Either drafted by the college and confirmed by the company, or one of the
+/// company's own roles attached to the day. A drive may have none at all to
+/// begin with - a cell often invites a company before the roles are settled,
+/// and refusing to record the visit until they are would just move the
+/// negotiation back into email.
+model CampusDriveJob {
+  driveId     String
+  jobId       String
+  /// The company has looked at this role and stands behind it.
+  confirmedAt DateTime?
+
+  drive CampusDrive @relation(fields: [driveId], references: [id], onDelete: Cascade)
+  job   Job         @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@id([driveId, jobId])
+  @@index([jobId])
+}
+
+/// A student putting their name down for the visit.
+///
+/// Opting in is not applying. It is the campus version of the sheet that goes
+/// round before a company comes, and it is what tells the cell how many chairs
+/// to put out. Applications still happen against the Job, through the same
+/// route as everything else.
+model CampusDriveRegistration {
+  id          String    @id @default(cuid())
+  driveId     String
+  candidateId String
+  createdAt   DateTime  @default(now())
+  /// The cell can take somebody off the list; the row stays so the count of
+  /// who asked is still true.
+  removedAt   DateTime?
+
+  drive     CampusDrive @relation(fields: [driveId], references: [id], onDelete: Cascade)
+  candidate Candidate   @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([driveId, candidateId])
+  @@index([candidateId])
+}
+
+model Notice {
+  id       String  @id @default(cuid())
+  tenantId String
+  authorId String?
+
+  title String
+  body  String @db.Text
+
+  /// Who it is addressed to. At least one is always true.
+  toStudents  Boolean @default(false)
+  toCompanies Boolean @default(false)
+  toColleges  Boolean @default(false)
+
+  /// Shown from this moment. Set on creation; kept so a notice can be dated.
+  publishedAt DateTime @default(now())
+
+  /// Stops showing after this. Null means it stands until it is taken down -
+  /// which is right for a policy and wrong for a deadline, so it is asked for.
+  expiresAt DateTime?
+
+  /// Taken down without being destroyed, so the record of what was said stays.
+  retractedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  author User?  @relation("NoticeAuthor", fields: [authorId], references: [id], onDelete: SetNull)
+
+  @@index([tenantId, publishedAt])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  userId    String
+  type      String
+  title     String
+  body      String?   @db.Text
+  link      String?
+  payload   Json      @default("{}")
+  readAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt])
+}
+
+/// A pending account. Every user except the first super admin is born here:
+/// operations invites a placement officer, a college invites students and
+/// coordinators, a company invites its team.
+model Invite {
+  id          String     @id @default(cuid())
+  kind        InviteKind
+  email       String
+  invitedName String?
+
+  /// SHA-256 of the token that goes in the link. The raw token is never
+  /// stored, so a leaked database does not hand over working invite links.
+  tokenHash String @unique
+
+  /// Which seat the invitee takes once they accept.
+  /// Carried onto the account when the invitation is accepted, so whoever
+  /// sent it does not have to chase the person for details they already had.
+  invitedPhone String?
+
+  /// The role this invitation grants. Null on a student invitation,
+  /// which grants none.
+  roleId      String?
+  campusRole  CampusRole?
+  companyRole CompanyRole?
+
+  batchId   String?
+  collegeId String?
+  companyId String?
+  /// For an operations invitation: the institution the new admin will run.
+  /// Null on one for the platform team itself.
+  tenantId  String?
+  sentById  String?
+
+  /// Set when the account already exists and this invitation only activates it.
+  /// A placement officer entering a class list creates the student records
+  /// straight away - names and roll numbers appear on the roster immediately -
+  /// and each student then claims their own account by setting a password.
+  userId String?
+
+  expiresAt  DateTime
+  acceptedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  batch   Batch?        @relation(fields: [batchId], references: [id], onDelete: Cascade)
+  college College?      @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  company Company?      @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  tenant  Tenant?       @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+  sentBy  User?         @relation("InviteSender", fields: [sentById], references: [id])
+  role    PlatformRole? @relation(fields: [roleId], references: [id])
+  user    User?         @relation("InviteAccount", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([email])
+  @@index([collegeId])
+  @@index([companyId])
+}
+
+// ---------------------------------------------------------------------------
+// Infrastructure
+// ---------------------------------------------------------------------------
+
+/// Created and owned by connect-pg-simple, not by application code. It is
+/// modelled here only so Prisma knows the table exists and stops trying to
+/// drop it on every migration. Do not read or write it from the app.
+model UserSession {
+  sid    String @id @db.VarChar(128)
+  expire Int    @db.UnsignedInt
+  sess   String @db.MediumText
+
+  @@index([expire])
+  @@map("user_sessions")
+}
+
+// ---------------------------------------------------------------------------
+// Phase 2 - proof of work, preparation and placement-cell tools
+//
+// Where a row belongs to a college, company or drive it keeps the id as a
+// plain column with an index rather than a relation: these are read through
+// the owner's own queries, and a relation on every core model would put a
+// back-reference on tables that have nothing to do with them.
+// ---------------------------------------------------------------------------
+
+// --- NEP internships (compliance.internships) ------------------------------
+
+enum InternshipStatus {
+  PROPOSED
+  APPROVED
+  ONGOING
+  COMPLETED
+  REJECTED
+  WITHDRAWN
+}
+
+/// One internship a student is doing for credit.
+model Internship {
+  id           String           @id @default(cuid())
+  candidateId  String
+  collegeId    String?
+  tenantId     String?
+  /// Set when the internship came through the platform; free text otherwise.
+  companyId    String?
+  jobId        String?
+  organisation String
+  role         String
+  mode         String?
+  startDate    DateTime
+  endDate      DateTime
+  hoursPerWeek Int?
+  credits      Decimal?         @db.Decimal(4, 1)
+  status       InternshipStatus @default(PROPOSED)
+  decisionNote String?          @db.Text
+
+  mentorName      String?
+  mentorEmail     String?
+  /// SHA-256 of the token in the mentor's evaluation link.
+  mentorTokenHash String? @unique
+
+  /// The mentor's evaluation, 1-5, and what they wrote.
+  evaluationScore Int?
+  evaluationNote  String?   @db.Text
+  evaluatedAt     DateTime?
+
+  certificateUrl String?   @db.Text
+  /// When the college marked the credits as sent to the student's ABC account.
+  abcSubmittedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  candidate Candidate       @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  logs      InternshipLog[]
+
+  @@index([collegeId, status])
+  @@index([candidateId])
+}
+
+/// A week's work, written by the student and signed off by the college.
+model InternshipLog {
+  id           String    @id @default(cuid())
+  internshipId String
+  weekStart    DateTime
+  hours        Int
+  summary      String    @db.Text
+  reviewedAt   DateTime?
+  reviewerNote String?   @db.Text
+  createdAt    DateTime  @default(now())
+
+  internship Internship @relation(fields: [internshipId], references: [id], onDelete: Cascade)
+
+  @@unique([internshipId, weekStart])
+}
+
+// --- readiness and aptitude (dev.readiness, dev.aptitude) ------------------
+
+/// A student's self-check across the six readiness areas. The latest is the
+/// current score; earlier ones are the progress line.
+model ReadinessCheck {
+  id          String   @id @default(cuid())
+  candidateId String
+  /// { aptitude, technical, communication, interview, presence, clarity } 0-100
+  scores      Json
+  createdAt   DateTime @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId, createdAt])
+}
+
+enum AptitudeSection {
+  QUANT
+  REASONING
+  VERBAL
+  TECHNICAL
+}
+
+/// A practice question. tenantId null = the shared bank every institution gets.
+model AptitudeQuestion {
+  id          String          @id @default(cuid())
+  tenantId    String?
+  section     AptitudeSection
+  topic       String
+  difficulty  Int             @default(2)
+  /// A company pattern this question practises, e.g. "Service-company NQT".
+  pattern     String?
+  stem        String          @db.Text
+  options     Json
+  answerIndex Int
+  explanation String?         @db.Text
+  isActive    Boolean         @default(true)
+  createdAt   DateTime        @default(now())
+
+  attempts AptitudeAttempt[]
+
+  @@index([section, topic])
+  @@index([tenantId])
+}
+
+model AptitudeAttempt {
+  id          String   @id @default(cuid())
+  candidateId String
+  questionId  String
+  chosenIndex Int
+  correct     Boolean
+  timeMs      Int?
+  createdAt   DateTime @default(now())
+
+  candidate Candidate        @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  question  AptitudeQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId, createdAt])
+  @@index([candidateId, questionId])
+}
+
+// --- mock interviews (dev.mockInterview) -----------------------------------
+
+model MockInterviewSession {
+  id          String   @id @default(cuid())
+  candidateId String
+  /// HR, TECHNICAL or MANAGERIAL.
+  kind        String
+  role        String
+  createdAt   DateTime @default(now())
+
+  candidate Candidate    @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  answers   MockAnswer[]
+
+  @@index([candidateId, createdAt])
+}
+
+model MockAnswer {
+  id          String   @id @default(cuid())
+  sessionId   String
+  question    String   @db.Text
+  answer      String   @db.Text
+  durationSec Int?
+  /// Structured feedback; `source` says whether AI or the built-in rules made it.
+  feedback    Json
+  createdAt   DateTime @default(now())
+
+  session MockInterviewSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+}
+
+// --- work simulations (proof.simulations) ----------------------------------
+
+enum SimulationStatus {
+  DRAFT
+  PUBLISHED
+  ARCHIVED
+}
+
+/// A short, company-built project a student can do to show real work.
+model Simulation {
+  id             String           @id @default(cuid())
+  companyId      String
+  title          String
+  role           String
+  summary        String           @db.Text
+  estimatedHours Int              @default(4)
+  skills         Json             @default("[]")
+  status         SimulationStatus @default(DRAFT)
+  createdAt      DateTime         @default(now())
+  updatedAt      DateTime         @updatedAt
+
+  company    Company               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  tasks      SimulationTask[]
+  enrolments SimulationEnrolment[]
+
+  @@index([status])
+}
+
+model SimulationTask {
+  id           String @id @default(cuid())
+  simulationId String
+  order        Int
+  title        String
+  brief        String @db.Text
+  /// [{ label, url }]
+  resources    Json   @default("[]")
+
+  simulation  Simulation             @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  submissions SimulationSubmission[]
+
+  @@unique([simulationId, order])
+}
+
+enum EnrolmentStatus {
+  IN_PROGRESS
+  SUBMITTED
+  EXPLAIN_BOOKED
+  COMPLETED
+  NEEDS_WORK
+}
+
+model SimulationEnrolment {
+  id              String          @id @default(cuid())
+  simulationId    String
+  candidateId     String
+  status          EnrolmentStatus @default(IN_PROGRESS)
+  /// The short "explain your work" call that stops copied or AI-made work passing.
+  explainAt       DateTime?
+  explainNote     String?         @db.Text
+  reviewedById    String?
+  completedAt     DateTime?
+  /// Printed on the certificate; anyone can check it.
+  certificateCode String?         @unique
+  createdAt       DateTime        @default(now())
+
+  simulation  Simulation             @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  candidate   Candidate              @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  submissions SimulationSubmission[]
+
+  @@unique([simulationId, candidateId])
+}
+
+model SimulationSubmission {
+  id          String   @id @default(cuid())
+  enrolmentId String
+  taskId      String
+  text        String?  @db.Text
+  link        String?  @db.Text
+  submittedAt DateTime @default(now())
+
+  enrolment SimulationEnrolment @relation(fields: [enrolmentId], references: [id], onDelete: Cascade)
+  task      SimulationTask      @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([enrolmentId, taskId])
+}
+
+// --- campus stories and the student showcase -------------------------------
+
+enum StoryKind {
+  INTERVIEW
+  INTERN_DIARY
+  FIRST_MONTHS
+}
+
+enum StoryStatus {
+  PENDING
+  PUBLISHED
+  HIDDEN
+}
+
+/// Seniors telling juniors what it was really like, by company, college and year.
+model CampusStory {
+  id          String      @id @default(cuid())
+  candidateId String
+  collegeId   String?
+  companyId   String?
+  companyName String
+  kind        StoryKind
+  role        String
+  year        Int
+  /// For interview experiences: [{ name, what }] per round.
+  rounds      Json        @default("[]")
+  body        String      @db.Text
+  difficulty  Int?
+  result      String?
+  anonymous   Boolean     @default(false)
+  status      StoryStatus @default(PENDING)
+  helpful     Int         @default(0)
+  createdAt   DateTime    @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([collegeId, status])
+  @@index([companyId, status])
+}
+
+enum ShowcaseVisibility {
+  PRIVATE
+  COLLEGE
+  RECRUITERS
+}
+
+/// The student's portfolio: a pitch, their best work, who may see it.
+model ShowcaseProfile {
+  candidateId String             @id
+  pitch       String?            @db.Text
+  videoUrl    String?            @db.Text
+  /// Up to three project ids from the profile, in order.
+  pinned      Json               @default("[]")
+  visibility  ShowcaseVisibility @default(PRIVATE)
+  updatedAt   DateTime           @updatedAt
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+}
+
+enum InviteToApplyStatus {
+  SENT
+  SEEN
+  APPLIED
+  DECLINED
+}
+
+/// A recruiter asking a student to apply - the only message a recruiter can send.
+model ShowcaseInvite {
+  id          String              @id @default(cuid())
+  companyId   String
+  candidateId String
+  jobId       String?
+  message     String              @db.Text
+  status      InviteToApplyStatus @default(SENT)
+  sentById    String
+  createdAt   DateTime            @default(now())
+
+  company   Company   @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId, status])
+  @@index([companyId])
+}
+
+// --- placement-cell tools (ops.employerCrm, ops.driveDay) ------------------
+
+enum EmployerStage {
+  PROSPECT
+  CONTACTED
+  INTERESTED
+  VISITING
+  HIRED
+  DORMANT
+}
+
+/// A college's relationship with one employer - the CRM row.
+model EmployerRelation {
+  id          String        @id @default(cuid())
+  collegeId   String
+  companyId   String?
+  companyName String
+  stage       EmployerStage @default(PROSPECT)
+  priority    Int           @default(2)
+  notes       String?       @db.Text
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  contacts     EmployerContact[]
+  interactions EmployerInteraction[]
+
+  @@unique([collegeId, companyName])
+  @@index([collegeId, stage])
+}
+
+model EmployerContact {
+  id          String  @id @default(cuid())
+  relationId  String
+  name        String
+  designation String?
+  email       String?
+  phone       String?
+
+  relation EmployerRelation @relation(fields: [relationId], references: [id], onDelete: Cascade)
+}
+
+model EmployerInteraction {
+  id             String    @id @default(cuid())
+  relationId     String
+  /// CALL, EMAIL, MEETING, VISIT or NOTE.
+  kind           String
+  summary        String    @db.Text
+  happenedAt     DateTime  @default(now())
+  followUpAt     DateTime?
+  followUpDoneAt DateTime?
+  createdById    String?
+  createdAt      DateTime  @default(now())
+
+  relation EmployerRelation @relation(fields: [relationId], references: [id], onDelete: Cascade)
+
+  @@index([relationId, happenedAt])
+}
+
+/// A room or panel on drive day.
+model DriveRoom {
+  id          String   @id @default(cuid())
+  placementId String
+  jobId       String?
+  name        String
+  panel       String?
+  createdAt   DateTime @default(now())
+
+  @@index([placementId])
+}
+
+/// A student arriving on drive day, scanned or ticked in.
+model DriveCheckIn {
+  id          String   @id @default(cuid())
+  placementId String
+  candidateId String
+  roomId      String?
+  /// QR or MANUAL.
+  method      String
+  checkedInAt DateTime @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([placementId, candidateId])
+}
+
+// ---------------------------------------------------------------------------
+// Phase 3 - trust after the offer, deeper practice, opportunities, network,
+// insight and reach
+// ---------------------------------------------------------------------------
+
+// --- offer protection and reputation (trust.offerProtection, trust.reputation)
+
+enum JoiningStatus {
+  AWAITING
+  CONFIRMED
+  DELAYED
+  JOINED
+  REVOKED
+}
+
+/// What happens to an accepted offer between "yes" and the first day.
+model JoiningTracker {
+  id                  String        @id @default(cuid())
+  applicationId       String        @unique
+  candidateId         String
+  companyId           String
+  collegeId           String?
+  expectedJoiningDate DateTime?
+  status              JoiningStatus @default(AWAITING)
+  /// Why the date moved or the offer was withdrawn, in the company's words.
+  reason              String?       @db.Text
+  /// [{ at, by: STUDENT|COMPANY|COLLEGE, status, date?, note? }]
+  history             Json          @default("[]")
+  updatedAt           DateTime      @updatedAt
+  createdAt           DateTime      @default(now())
+
+  @@index([companyId, status])
+  @@index([collegeId, status])
+}
+
+/// A student rating how a company ran its hiring - never the people in it.
+model ProcessRating {
+  id            String   @id @default(cuid())
+  applicationId String   @unique
+  candidateId   String
+  companyId     String
+  communication Int
+  clarity       Int
+  fairness      Int
+  note          String?  @db.Text
+  createdAt     DateTime @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([companyId])
+}
+
+/// A company noting whether a candidate kept their word.
+model ReliabilityMark {
+  id            String   @id @default(cuid())
+  applicationId String   @unique
+  candidateId   String
+  companyId     String
+  /// ON_TIME, NO_SHOW or RENEGED.
+  kind          String
+  note          String?  @db.Text
+  createdById   String?
+  createdAt     DateTime @default(now())
+
+  @@index([candidateId])
+}
+
+// --- practice (dev.gd, dev.confidence, dev.softSkills) ---------------------
+
+model GdSession {
+  id          String    @id @default(cuid())
+  candidateId String
+  topic       String
+  /// [{ speaker, text, at }] - the whole discussion.
+  transcript  Json      @default("[]")
+  feedback    Json?
+  createdAt   DateTime  @default(now())
+  endedAt     DateTime?
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId, createdAt])
+}
+
+/// Private to the student: mood check-ins, wins, steps on the practice ladder.
+model WellbeingEntry {
+  id          String   @id @default(cuid())
+  candidateId String
+  /// MOOD, WIN or LADDER.
+  kind        String
+  value       Json
+  createdAt   DateTime @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId, kind, createdAt])
+}
+
+model SoftSkillAttempt {
+  id          String   @id @default(cuid())
+  candidateId String
+  /// SPEAKING, PITCH or EMAIL.
+  kind        String
+  prompt      String   @db.Text
+  response    String   @db.Text
+  feedback    Json
+  createdAt   DateTime @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@index([candidateId, kind, createdAt])
+}
+
+// --- micro-internships and campus weeks ------------------------------------
+
+enum MicroProjectStatus {
+  DRAFT
+  OPEN
+  CLOSED
+  COMPLETED
+}
+
+/// A short paid project: 10-40 hours of real work.
+model MicroProject {
+  id        String             @id @default(cuid())
+  companyId String
+  title     String
+  brief     String             @db.Text
+  hours     Int
+  /// Paid by the company, outside the platform for now.
+  stipend   Decimal            @db.Decimal(10, 2)
+  skills    Json               @default("[]")
+  slots     Int                @default(1)
+  deadline  DateTime
+  status    MicroProjectStatus @default(DRAFT)
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+
+  applications MicroApplication[]
+
+  @@index([status, deadline])
+  @@index([companyId])
+}
+
+enum MicroApplicationStatus {
+  APPLIED
+  SELECTED
+  REJECTED
+  DELIVERED
+  COMPLETED
+  WITHDRAWN
+}
+
+model MicroApplication {
+  id                 String                 @id @default(cuid())
+  projectId          String
+  candidateId        String
+  pitch              String                 @db.Text
+  status             MicroApplicationStatus @default(APPLIED)
+  deliverable        String?                @db.Text
+  rating             Int?
+  review             String?                @db.Text
+  paidAt             DateTime?
+  /// The student confirming the stipend actually reached them.
+  paymentConfirmedAt DateTime?
+  createdAt          DateTime               @default(now())
+  updatedAt          DateTime               @updatedAt
+
+  project   MicroProject @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  candidate Candidate    @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([projectId, candidateId])
+}
+
+enum CampusWeekStatus {
+  PROPOSED
+  APPROVED
+  DECLINED
+  DONE
+}
+
+/// An event on a campus: a company taking over a week, or the placement cell
+/// running a single session of its own.
+///
+/// One shape serves both. A company proposes one and the college decides; a
+/// college creates its own and it is on from the moment it is saved, because
+/// there is nobody left to approve it. `companyId` null is what says which.
+model CampusWeek {
+  id           String           @id @default(cuid())
+  companyId    String?
+  collegeId    String
+  title        String
+  message      String?          @db.Text
+  startDate    DateTime
+  endDate      DateTime
+  status       CampusWeekStatus @default(PROPOSED)
+  decisionNote String?          @db.Text
+  createdAt    DateTime         @default(now())
+
+  events CampusWeekEvent[]
+
+  @@index([collegeId, status])
+  @@index([companyId])
+}
+
+model CampusWeekEvent {
+  id           String   @id @default(cuid())
+  weekId       String
+  /// TALK, CHALLENGE, ALUMNI, INTERVIEWS, PREP or WORKSHOP.
+  kind         String
+  title        String
+  startsAt     DateTime
+  durationMin  Int      @default(60)
+  where        String?  @db.Text
+  simulationId String?
+  /// The role this session is about, where it is about one: a preparation
+  /// session for a drive shows on that job, and its invitations can be drawn
+  /// from the people who applied to it.
+  jobId        String?
+
+  week          CampusWeek               @relation(fields: [weekId], references: [id], onDelete: Cascade)
+  registrations CampusWeekRegistration[]
+}
+
+/// One student against one session: how they came to be on the list, and
+/// whether they turned up.
+///
+/// INVITED is the creator asking; GOING is the student saying yes, whether
+/// they were invited or found it themselves; DECLINED is an invitation turned
+/// down, kept so it is not sent again. Only GOING is counted as registered.
+model CampusWeekRegistration {
+  eventId     String
+  candidateId String
+  status      String    @default("GOING")
+  /// When the creator invited them, for an invitation they did not ask for.
+  invitedAt   DateTime?
+  attended    Boolean   @default(false)
+  createdAt   DateTime  @default(now())
+
+  event CampusWeekEvent @relation(fields: [eventId], references: [id], onDelete: Cascade)
+
+  @@id([eventId, candidateId])
+}
+
+// --- alumni and pooled drives ----------------------------------------------
+
+/// A graduate who has said they will help juniors from their college.
+model AlumniProfile {
+  candidateId    String   @id
+  available      Boolean  @default(true)
+  currentCompany String?
+  currentRole    String?
+  canRefer       Boolean  @default(false)
+  /// Topics they are happy to answer about.
+  topics         Json     @default("[]")
+  updatedAt      DateTime @updatedAt
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+}
+
+model AlumniQuestion {
+  id          String   @id @default(cuid())
+  collegeId   String
+  askedById   String
+  companyName String?
+  body        String   @db.Text
+  anonymous   Boolean  @default(false)
+  /// OPEN, ANSWERED or HIDDEN.
+  status      String   @default("OPEN")
+  createdAt   DateTime @default(now())
+
+  answers AlumniAnswer[]
+
+  @@index([collegeId, status])
+}
+
+model AlumniAnswer {
+  id          String   @id @default(cuid())
+  questionId  String
+  candidateId String
+  body        String   @db.Text
+  createdAt   DateTime @default(now())
+
+  question AlumniQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+}
+
+model ReferralRequest {
+  id              String   @id @default(cuid())
+  fromCandidateId String
+  toCandidateId   String
+  company         String
+  role            String
+  message         String   @db.Text
+  /// SENT, ACCEPTED, DECLINED.
+  status          String   @default("SENT")
+  createdAt       DateTime @default(now())
+
+  @@index([toCandidateId, status])
+}
+
+/// Several colleges running one drive together, so small campuses are worth a
+/// company's visit. Each college keeps its own Placement and still approves
+/// every role for its own students.
+model PooledDrive {
+  id            String   @id @default(cuid())
+  tenantId      String?
+  hostCollegeId String
+  name          String
+  year          Int
+  /// FINAL or INTERNSHIP.
+  type          String   @default("FINAL")
+  createdAt     DateTime @default(now())
+
+  members PooledDriveMember[]
+
+  @@index([hostCollegeId])
+}
+
+model PooledDriveMember {
+  poolId      String
+  collegeId   String
+  placementId String?
+  /// INVITED, JOINED or DECLINED.
+  status      String   @default("INVITED")
+  createdAt   DateTime @default(now())
+
+  pool PooledDrive @relation(fields: [poolId], references: [id], onDelete: Cascade)
+
+  @@id([poolId, collegeId])
+}
+
+// --- reach (channel.whatsapp) ----------------------------------------------
+
+/// Every WhatsApp message the platform tried to send, and what happened.
+model WhatsAppMessage {
+  id             String   @id @default(cuid())
+  candidateId    String
+  tenantId       String?
+  /// The in-app notification this message copies, so each is sent at most once.
+  notificationId String?  @unique
+  template       String
+  /// The number, masked to its last four digits - the full one stays on the student.
+  toMasked       String
+  /// QUEUED, SENT, FAILED or SKIPPED.
+  status         String
+  error          String?  @db.Text
+  createdAt      DateTime @default(now())
+
+  @@index([tenantId, createdAt])
+  @@index([candidateId])
+}
+
+/// An institution's own decision about a company, on top of the platform's
+/// verification. Only consulted when the tenant has companyApprovalRequired on.
+model TenantCompany {
+  tenantId    String
+  companyId   String
+  /// PENDING, APPROVED or BLOCKED.
+  status      String    @default("PENDING")
+  note        String?   @db.Text
+  requestedAt DateTime  @default(now())
+  decidedAt   DateTime?
+  decidedById String?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@id([tenantId, companyId])
+  @@index([companyId])
+}
+
+// --- assessments -----------------------------------------------------------
+
+enum AssessmentStatus {
+  /// Set, not yet sat.
+  ASSIGNED
+  /// Sat, and waiting for whoever set it to record the result.
+  SUBMITTED
+  PASSED
+  FAILED
+  /// The date went by. A real outcome, and the reason applications stall.
+  MISSED
+}
+
+/// A test somebody is asked to sit.
+///
+/// Assigned, never requested. A company shortlists and says "take this by
+/// Friday"; it does not publish tests and wait for volunteers, and an
+/// approval step between the two would be latency nobody benefits from.
+///
+/// Apli does not host the questions yet, so `url` is the company's own
+/// platform. What Apli holds is who was asked, by when, and what came back -
+/// which is the part that was missing entirely.
+model Assessment {
+  id String @id @default(cuid())
+
+  /// Who set it, and therefore who sees the result.
+  ///
+  /// A company for a hiring gate; a college for a test it runs across a
+  /// batch. Exactly one of the two, which the service enforces - a test
+  /// belonging to nobody has no one entitled to read it.
+  companyId String?
+  collegeId String?
+
+  title        String
+  instructions String? @db.Text
+  url          String? @db.Text
+  durationMin  Int?
+
+  /// Whether somebody watched it being taken.
+  ///
+  /// The label, not proctoring. An unsupervised score taken at home is worth
+  /// something quite different from one sat in a college lab, and a recruiter
+  /// who cannot tell discounts both. Saying which is nearly free and is what
+  /// makes a college-run test worth reading.
+  supervised Boolean @default(false)
+
+  /// Attempts allowed beyond the first.
+  retakes Int @default(0)
+
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  company     Company?               @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  college     College?               @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  createdBy   User                   @relation("AssessmentAuthor", fields: [createdById], references: [id])
+  assignments AssessmentAssignment[]
+
+  @@index([companyId])
+  @@index([collegeId])
+}
+
+/// One student, asked to sit one test, once.
+model AssessmentAssignment {
+  id           String @id @default(cuid())
+  assessmentId String
+  candidateId  String
+
+  /// The application it gates, when it is a hiring gate rather than a batch
+  /// test. Null for a college test that belongs to the student, not to one
+  /// process.
+  applicationId String?
+
+  dueAt   DateTime?
+  status  AssessmentStatus @default(ASSIGNED)
+  attempt Int              @default(1)
+
+  /// What the student sent back: a reference number, a link, a score slip.
+  /// Free text, because every external platform names its own differently.
+  submittedRef String?
+  submittedAt  DateTime?
+
+  score    Decimal? @db.Decimal(6, 2)
+  maxScore Decimal? @db.Decimal(6, 2)
+  feedback String?  @db.Text
+
+  reviewedById String?
+  reviewedAt   DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  assessment  Assessment   @relation(fields: [assessmentId], references: [id], onDelete: Cascade)
+  candidate   Candidate    @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  application Application? @relation(fields: [applicationId], references: [id], onDelete: SetNull)
+  reviewedBy  User?        @relation("AssessmentReviewer", fields: [reviewedById], references: [id])
+
+  @@unique([assessmentId, candidateId, attempt])
+  @@index([candidateId, status])
+  @@index([applicationId])
+}
+
+// --- the campus feed -------------------------------------------------------
+
+enum PostAuthorKind {
+  /// A student at the college.
+  STUDENT
+  /// The placement cell, posting as the college itself.
+  COLLEGE
+  /// A company with an accepted posting at that college.
+  COMPANY
+}
+
+/// One post on a college's feed.
+///
+/// Fenced at the college, like everything else here. A story is read only by
+/// its own college's students; a job is seen only where the cell accepted it;
+/// a student is findable by a recruiter only having chosen it and consented.
+/// A feed that crossed colleges would be the single hole in an otherwise
+/// consistent wall - and somebody writing about a rejection does not expect
+/// it reaching a recruiter at another campus.
+///
+/// So `collegeId` is not a label on the post. It is who the post is for.
+model Post {
+  id         String         @id @default(cuid())
+  collegeId  String
+  authorId   String
+  authorKind PostAuthorKind @default(STUDENT)
+
+  /// What they wrote, as HTML.
+  ///
+  /// No title: a feed post is a thing somebody said, and asking for a
+  /// headline turns it into an article nobody writes.
+  ///
+  /// Named for what it holds. It is sanitised against a tight allowlist on
+  /// the way in - never on the way out - so this column already contains
+  /// exactly what a browser will render, and a future screen that forgets to
+  /// sanitise cannot hurt anybody.
+  bodyHtml String @db.Text
+
+  /// Photographs and video, as a list.
+  ///
+  /// JSON rather than a table of its own because it is only ever read with
+  /// its post, the same reasoning as a company's photographs. Every entry is
+  /// an asset reference this server issued, never a URL somebody pasted.
+  media Json @default("[]")
+
+  /// Taken down by the placement cell, or by the author.
+  ///
+  /// Kept rather than deleted so a removal can be answered for: a cell that
+  /// takes down a student's post should leave a record that it did.
+  removedAt   DateTime?
+  removedById String?
+  removedWhy  String?   @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  college  College       @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  author   User          @relation("PostAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+  comments PostComment[]
+  likes    PostLike[]
+
+  @@index([collegeId, createdAt])
+  @@index([authorId])
+}
+
+/// A reply under a post. One level deep - threads on a campus feed become
+/// arguments nobody can follow.
+model PostComment {
+  id        String    @id @default(cuid())
+  postId    String
+  authorId  String
+  body      String    @db.Text
+  removedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  post   Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  author User @relation("CommentAuthor", fields: [authorId], references: [id], onDelete: Cascade)
+
+  @@index([postId, createdAt])
+}
+
+/// One person, one like, one post.
+model PostLike {
+  postId    String
+  userId    String
+  createdAt DateTime @default(now())
+
+  post Post @relation(fields: [postId], references: [id], onDelete: Cascade)
+  user User @relation("PostLiker", fields: [userId], references: [id], onDelete: Cascade)
+
+  @@id([postId, userId])
+  @@index([userId])
+}
+
+// --- career counselling ----------------------------------------------------
+
+/// Why somebody asked to talk.
+///
+/// A short list rather than a free-text box alone, because the reason decides
+/// who should take it and what they should read first - and because a student
+/// who has to compose the question often does not ask at all.
+enum CounsellingReason {
+  /// Two offers, and the one-offer rule means answering closes the other.
+  OFFER_CHOICE
+  /// Applying, and nothing is coming back.
+  NOT_SHORTLISTED
+  /// A bond, a location, or a clause they do not want to sign alone.
+  BOND_OR_LOCATION
+  /// The people at home want something different.
+  FAMILY
+  /// No idea what they are aiming at.
+  DIRECTION
+  OTHER
+}
+
+enum CounsellingStatus {
+  /// Asked, nobody has picked it up.
+  OPEN
+  /// Somebody has, and there is a time.
+  BOOKED
+  /// It happened, and what was agreed is written down.
+  DONE
+  /// Withdrawn by the student, or closed without a conversation.
+  CLOSED
+}
+
+/// A student asking to talk to somebody.
+///
+/// The portal already knows when a student has stalled - `atRisk` computes it
+/// and tells the college. What it has never had is the other direction: a way
+/// for the student to say they need a conversation. This is that.
+///
+/// Fenced at the college, like everything else: the cell that reads it is the
+/// student's own.
+model CounsellingRequest {
+  id          String @id @default(cuid())
+  candidateId String
+  collegeId   String
+
+  reason CounsellingReason
+  /// Their own words. Optional - the reason is enough to start from.
+  note   String?           @db.Text
+
+  status CounsellingStatus @default(OPEN)
+
+  /// When the conversation is, once somebody has set a time.
+  meetAt    DateTime?
+  /// Where, or how. A room, a link, a phone call.
+  meetWhere String?
+
+  /// Who picked it up.
+  counsellorId String?
+
+  /// What was agreed.
+  ///
+  /// Written for the student to read, not as a note about them. A
+  /// conversation that leaves no record cannot be followed up, and the
+  /// student cannot hold anybody to what was said in it.
+  outcome String? @db.Text
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  candidate  Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  college    College   @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  counsellor User?     @relation("Counsellor", fields: [counsellorId], references: [id], onDelete: SetNull)
+
+  @@index([collegeId, status, createdAt])
+  @@index([candidateId, createdAt])
+}

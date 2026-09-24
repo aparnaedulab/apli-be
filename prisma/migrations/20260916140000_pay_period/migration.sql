@@ -1,0 +1,3 @@
+-- AlterTable
+ALTER TABLE `Job` ADD COLUMN `payPeriod` VARCHAR(191) NOT NULL DEFAULT 'YEARLY';
+

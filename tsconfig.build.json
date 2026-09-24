@@ -1,0 +1,14 @@
+{
+  // The production build. The base tsconfig also compiles tests/ and prisma/,
+  // which pushes the entry point down to dist/src/index.js and ships the test
+  // suite to the server. This one builds src/ alone, so `npm start` finds
+  // dist/index.js where it expects it.
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "rootDir": "src",
+    "outDir": "dist",
+    "sourceMap": false
+  },
+  "include": ["src/**/*.ts"],
+  "exclude": ["node_modules", "dist", "tests", "prisma"]
+}
