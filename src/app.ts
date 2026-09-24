@@ -1,3 +1,4 @@
+import { join, resolve } from 'node:path';
 import express, { type Express, type Request, type Response } from 'express';
 import session from 'express-session';
 import MySQLStoreFactory from 'express-mysql-session';
@@ -230,6 +231,29 @@ export function createApp(): Express {
   //   api.use('/applications', applicationRouter); M8
 
   app.use('/api', api);
+
+  /*
+   * Serve the built client from this process, when asked to.
+   *
+   * Mounted after /api so it can never shadow a route, and before the 404 so
+   * a deep link still lands: a single-page app owns its own routing, and a
+   * reader who refreshes on /student/profile must get index.html rather than
+   * this server's idea of a missing page. Anything under /api that got this
+   * far really is missing, so it keeps the JSON 404 it always had.
+   */
+  if (env.CLIENT_DIST) {
+    const dist = resolve(env.CLIENT_DIST);
+    // Hashed assets never change under the same name, so they are cached hard;
+    // index.html is the one file that must not be, or a deploy is invisible
+    // until everybody clears their browser.
+    app.use(express.static(dist, { index: false, maxAge: '1y' }));
+    app.get(/^\/(?!api\/).*/, (_req, res, next) => {
+      res.sendFile(join(dist, 'index.html'), { headers: { 'Cache-Control': 'no-store' } }, (err) => {
+        if (err) next(err);
+      });
+    });
+  }
+
   app.use(notFoundHandler);
   app.use(errorHandler);
 

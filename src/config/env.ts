@@ -44,6 +44,20 @@ const schema = z.object({
   COOKIE_SECURE: optional(z.enum(['true', 'false']).transform((v) => v === 'true')),
 
   /**
+   * Where the built client is, for serving it from this process.
+   *
+   * Unset - the default - means something else serves it: nginx in front,
+   * or Vite in development. Set it and Node serves the bundle itself, which
+   * puts the site and the API on one origin and one port.
+   *
+   * That is not a convenience. The client fetches a relative `/api`, so on
+   * two ports it would ask the port it was served from and find nothing
+   * there; and the session cookie is `sameSite: lax`, which a second origin
+   * complicates for no gain. One port removes both problems.
+   */
+  CLIENT_DIST: optional(z.string().trim().min(1)),
+
+  /**
    * The university this portal belongs to.
    *
    * It is a setting rather than a constant because it appears in three places
