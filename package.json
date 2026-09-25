@@ -25,7 +25,10 @@
     "create:admin": "tsx src/scripts/createAdmin.ts",
     "seed:catalogue": "tsx src/scripts/seedCatalogue.ts",
     "seed:courses": "tsx src/scripts/seedCourses.ts",
-    "sync:roles": "tsx src/scripts/syncRoles.ts"
+    "sync:roles": "tsx src/scripts/syncRoles.ts",
+    "prisma": "tsx src/scripts/prisma.ts",
+    "db:migrate": "tsx src/scripts/prisma.ts migrate deploy",
+    "db:generate": "tsx src/scripts/prisma.ts generate"
   },
   "prisma": {
     "seed": "tsx prisma/seed.ts"

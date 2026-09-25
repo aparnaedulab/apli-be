@@ -25,7 +25,28 @@ const optional = <T extends z.ZodTypeAny>(inner: T) =>
 const schema = z.object({
   NODE_ENV: z.enum(['development', 'test', 'production']).default('development'),
   PORT: z.coerce.number().int().positive().default(4000),
-  DATABASE_URL: z.string().min(1, 'DATABASE_URL is required'),
+  /*
+   * The database, as five plain fields.
+   *
+   * These are the source of truth. DATABASE_URL used to be, composed in the
+   * .env file itself with ${...} interpolation - which meant the connection
+   * was configured in two places that had to agree, and a password with a #
+   * or an @ in it silently truncated the URL and came back as "credentials
+   * are not valid". Building the URL here instead means a password is
+   * escaped properly because code does it, not because somebody remembered.
+   */
+  MYSQL_HOST: z.string().trim().min(1).default('127.0.0.1'),
+  MYSQL_PORT: z.coerce.number().int().positive().default(3306),
+  MYSQL_USER: z.string().trim().min(1).default('apli'),
+  MYSQL_PASSWORD: z.string().default(''),
+  MYSQL_DATABASE: z.string().trim().min(1).default('apli'),
+
+  /**
+   * A complete connection string, when the five fields above cannot express
+   * it - a managed host that hands you a URL, a socket path, TLS parameters.
+   * Given, it wins outright and the fields are ignored.
+   */
+  DATABASE_URL: optional(z.string().trim().min(1)),
   SESSION_SECRET: z
     .string()
     .min(32, 'SESSION_SECRET must be at least 32 characters - generate a random one'),
@@ -142,13 +163,32 @@ export const env = parsed.data;
 export const isProduction = env.NODE_ENV === 'production';
 
 /**
+ * The connection string, built from the fields unless one was given whole.
+ *
+ * `encodeURIComponent` on the user and password is the point: a password of
+ * `Apli#2026#db` is perfectly legal in MySQL and cuts a hand-written URL in
+ * half, because `#` starts a fragment. Escaping it here means no one has to
+ * know that.
+ *
+ * Exported onto process.env as well, because Prisma's CLI - `migrate deploy`,
+ * `db seed` - reads DATABASE_URL from the environment and never sees this
+ * module. One definition, whichever way the database is reached.
+ */
+export const databaseUrl: string =
+  env.DATABASE_URL ??
+  `mysql://${encodeURIComponent(env.MYSQL_USER)}:${encodeURIComponent(env.MYSQL_PASSWORD)}` +
+    `@${env.MYSQL_HOST}:${env.MYSQL_PORT}/${env.MYSQL_DATABASE}`;
+
+process.env.DATABASE_URL = databaseUrl;
+
+/**
  * The same database, as discrete fields.
  *
  * Prisma takes the URL, but the session store wants host/user/password
  * separately - so it is parsed once here rather than in both places.
  */
 export function databaseConnection() {
-  const url = new URL(env.DATABASE_URL);
+  const url = new URL(databaseUrl);
   return {
     host: url.hostname,
     port: url.port ? Number(url.port) : 3306,
