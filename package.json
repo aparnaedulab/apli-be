@@ -8,6 +8,7 @@
   },
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "prebuild": "node scripts/check-prisma-client.mjs",
     "build": "tsc -p tsconfig.build.json",
     "start": "node dist/index.js",
     "db:up": "docker compose -f ../docker-compose.yml up -d",
