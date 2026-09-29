@@ -33,6 +33,8 @@ import { SYSTEM_ROLES } from '../src/modules/roles/permissions.js';
 import { CORE_KEYS } from '../src/modules/tenants/catalogue.js';
 import { seedAptitude } from '../src/scripts/seedAptitude.js';
 import { setCollegePrograms } from '../src/modules/mapping/mapping.service.js';
+import { savePolicy } from '../src/modules/students/policy.js';
+import { teachAlias } from '../src/modules/students/programme.js';
 import { seedDepth } from './seed-depth.js';
 
 const PASSWORD = 'CampusHire2026';
@@ -516,6 +518,121 @@ async function seedProfileDetail() {
   );
 }
 
+
+/**
+ * What each institution collects about a student, and who may add one.
+ *
+ * Without this a freshly seeded demo shows the Student details screen on
+ * its defaults and registration switched off - which is the one state in
+ * which none of it can be demonstrated. So the two institutions are given
+ * deliberately different answers, because the whole point of the setting
+ * is that universities differ.
+ */
+async function seedIntake() {
+  const sppu = await prisma.tenant.findFirstOrThrow({ where: { slug: 'sppu' } });
+
+  /*
+   * The live university: strict, and open to students registering.
+   *
+   * A PRN is insisted on, because it is the number this university's own
+   * systems key on. Date of birth is not collected at all. Students may
+   * put themselves on the roster from the public site, and are asked for
+   * the things that decide what they can see - their programme above all,
+   * since a student with no course matches only roles that name none.
+   */
+  await savePolicy(sppu.id, {
+    fields: {
+      prn: 'required',
+      programme: 'required',
+      cgpa: 'required',
+      dateOfBirth: 'off',
+      pgCgpa: 'off',
+      pgPct: 'off',
+    },
+    universityMayAdd: true,
+    collegeMayAdd: true,
+    selfRegister: true,
+    selfFields: ['phone', 'programme', 'prn', 'rollNo', 'cgpa', 'tenthPct', 'twelfthPct'],
+    selfNeedsApproval: true,
+  });
+
+  /*
+   * The one still being onboarded is left on the defaults, so both halves
+   * of the setting can be seen side by side: an institution that has
+   * decided, and one that has not.
+   */
+
+  /*
+   * Spellings each college has taught the portal.
+   *
+   * A roster is typed by departments, over years, by people with their own
+   * shorthand. These are the three that would otherwise be refused, and
+   * they are here so the upload preview has something real to resolve.
+   */
+  const aliases: [string, string, string | null, string][] = [
+    ['PICT', 'B.Tech', 'Computer Science', 'Comp Engg'],
+    ['PICT', 'B.Tech', 'Computer Science', 'CSE'],
+    ['PICT', 'B.Tech', 'Information Technology', 'IT Engg'],
+    ['VIT-PUNE', 'B.Tech', 'Computer Science', 'Computer'],
+  ];
+
+  let taught = 0;
+  for (const [code, course, branch, spelling] of aliases) {
+    const college = await prisma.college.findUnique({ where: { code }, select: { id: true } });
+    if (!college) continue;
+
+    const programme = await prisma.collegeProgram.findFirst({
+      where: {
+        collegeId: college.id,
+        course: { name: course },
+        ...(branch ? { specialisation: { name: branch } } : { specialisationId: null }),
+      },
+      select: { id: true },
+    });
+    if (!programme) continue;
+
+    await teachAlias(college.id, programme.id, spelling, null);
+    taught++;
+  }
+
+  /*
+   * Programmes for the colleges the depth layer added.
+   *
+   * seedPrograms derives a college's programmes from the batches it has,
+   * which is right - the roster and the mapping cannot then disagree - but
+   * it leaves the five colleges that exist only as history with none. A
+   * college with no programmes has the programme check switched off, so a
+   * demo built on those five would never show it working.
+   */
+  // `ProgramChoice.branchId` is a Specialisation id, not the master Branch
+  // id its name suggests - that is what offeredPrograms hands back and what
+  // setCollegePrograms validates against.
+  const offered = await prisma.tenantProgram.findMany({
+    where: { tenantId: sppu.id },
+    select: { courseId: true, specialisationId: true },
+  });
+
+  const unmapped = await prisma.college.findMany({
+    where: { tenantId: sppu.id, programs: { none: {} } },
+    select: { id: true, code: true },
+  });
+
+  for (const [i, college] of unmapped.entries()) {
+    // A different slice each, so the demo is not seven identical colleges.
+    const slice = offered.filter((_, n) => n % unmapped.length === i % unmapped.length);
+    const choices = (slice.length > 0 ? slice : offered.slice(0, 2)).map((o) => ({
+      courseId: o.courseId,
+      branchId: o.specialisationId,
+    }));
+    await setCollegePrograms(sppu.id, college.id, choices);
+  }
+
+  console.log(
+    `  intake policy on ${sppu.name} (registration open), ` +
+      `${taught} programme spellings taught, ` +
+      `${unmapped.length} more colleges mapped`,
+  );
+}
 
 async function main() {
   console.log('Clearing…');
@@ -1189,6 +1306,9 @@ async function main() {
 
   // --- the half of a profile no seed ever filled in ------------------------
   await seedProfileDetail();
+
+  // --- what each institution collects, and who may add a student ----------
+  await seedIntake();
 
   // --- done ---------------------------------------------------------------
   // The shared practice bank. Idempotent on its own, so it is safe even if
