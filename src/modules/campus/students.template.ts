@@ -1,186 +1,22 @@
 import ExcelJS from 'exceljs';
-import { FIELD_BY_HEADER, normalise, type StudentRow } from './students.service.js';
+import { FIELD_BY_HEADER, normalise, templateFields } from '../students/fields.js';
+import { defaultPolicy, isOn, isRequired, type IntakePolicy } from '../students/policy.js';
+import type { StudentRow } from './students.service.js';
 
 /**
  * The class-list workbook: downloaded, filled in, uploaded back.
  *
- * Generated per request rather than kept as a file, so the Batch column can be
- * a dropdown of the batches that exist for this college right now. A static
- * template would go stale the moment a batch is added, and the result is a
- * spreadsheet full of values that create batches nobody meant to create.
+ * Every column, its help note and its two example values come from the
+ * student field registry, which is also what the parser matches headers
+ * against and what the student's own form is built from. One list, so the
+ * template cannot print a column the parser ignores - which is exactly what
+ * happened to "Graduating year".
+ *
+ * Generated per request rather than kept as a file, so the Batch, College
+ * and Gender columns can be dropdowns of what exists right now. A static
+ * template goes stale the moment a batch is added, and the result is a
+ * spreadsheet full of values that create things nobody meant to create.
  */
-
-interface Column {
-  header: string;
-  key: keyof StudentRow;
-  width: number;
-  required?: boolean;
-  note: string;
-}
-
-const COLUMNS: Column[] = [
-  {
-    header: 'Name',
-    key: 'fullName',
-    width: 24,
-    required: true,
-    note: 'The student’s full name, as it should appear to recruiters.',
-  },
-  {
-    header: 'Email',
-    key: 'email',
-    width: 30,
-    required: true,
-    note: 'Their own address. The activation link goes here, and it is how they sign in.',
-  },
-  {
-    header: 'Mobile',
-    key: 'phone',
-    width: 16,
-    required: true,
-    note: 'Ten digits. +91, spaces and dashes are all fine.',
-  },
-  {
-    header: 'Batch',
-    key: 'batch',
-    width: 22,
-    note: 'Which group they belong to. Pick one from the list, or type a new name and it will be created.',
-  },
-  {
-    header: 'Course',
-    key: 'course',
-    width: 14,
-    note: 'B.Tech, MCA, MBA. This is the student’s own course - recruiters filter on it.',
-  },
-  {
-    header: 'Branch',
-    key: 'specialisation',
-    width: 26,
-    note: 'Computer Science, Mechanical, Finance.',
-  },
-  {
-    header: 'Graduating year',
-    key: 'graduationYear',
-    width: 16,
-    note: 'Four digits. Recruiters filter on it, so it is worth filling in.',
-  },
-  { header: 'Roll No', key: 'rollNo', width: 14, note: 'The college roll number. Unique within a batch.' },
-  {
-    header: 'PRN',
-    key: 'prn',
-    width: 18,
-    note: 'The university registration number. Unique across the whole platform.',
-  },
-  { header: 'Div', key: 'division', width: 8, note: 'Division or section, if you use them.' },
-  { header: 'Gender', key: 'gender', width: 12, note: 'Optional, and free text.' },
-  {
-    header: 'DOB',
-    key: 'dateOfBirth',
-    width: 14,
-    note: '2005-04-17 or 17/04/2005. Both are understood.',
-  },
-  { header: 'CGPA', key: 'cgpa', width: 10, note: 'Out of 10. Recruiters filter on this.' },
-  {
-    header: 'Percentage',
-    key: 'degreePct',
-    width: 12,
-    note: 'Degree percentage, if your university awards one instead of a CGPA.',
-  },
-  { header: '10th %', key: 'tenthPct', width: 10, note: 'SSC percentage.' },
-  {
-    header: '12th %',
-    key: 'twelfthPct',
-    width: 10,
-    note: 'HSC percentage. Leave blank for a student who came through a diploma - fill in Diploma % instead, and a role asking for a 12th will read that.',
-  },
-  {
-    header: 'Diploma %',
-    key: 'diplomaPct',
-    width: 11,
-    note: 'For lateral-entry students, who have no 12th standard result. Without it, any role that sets a 12th bar is invisible to them.',
-  },
-  {
-    header: 'Live backlogs',
-    key: 'activeBacklogs',
-    width: 13,
-    note: 'Still outstanding right now. Almost every criteria sheet says "no live backlogs", and a role asking for it cannot see a student this is blank for.',
-  },
-  {
-    header: 'Backlogs (total)',
-    key: 'backlogs',
-    width: 15,
-    note: 'Ever accumulated, including ones since cleared. Different from live backlogs - "no live, at most two ever" is one sentence asking for both.',
-  },
-  {
-    header: 'PG CGPA',
-    key: 'pgCgpa',
-    width: 11,
-    note: 'Only for a student on a master’s - an MCA, M.Tech or MBA. Their bachelor’s goes in the CGPA column; this is the degree they are on now.',
-  },
-  {
-    header: 'PG %',
-    key: 'pgPct',
-    width: 10,
-    note: 'The same, where the university awards a percentage rather than a CGPA.',
-  },
-  {
-    header: 'Gap years',
-    key: 'gapYears',
-    width: 11,
-    note: 'Years out of study. 0 if none. Invisible in a CGPA and asked for constantly.',
-  },
-];
-
-const EXAMPLES = [
-  [
-    'Aditi Rane',
-    'aditi.rane@pict.demo-college.example',
-    '9000000023',
-    'CSE 2026',
-    'B.Tech',
-    'Computer Science',
-    '2026',
-    'CS22-101',
-    '72012301K',
-    'A',
-    'Female',
-    '17/04/2005',
-    '8.6',
-    '',
-    '91',
-    '88',
-    '',
-    '0',
-    '0',
-    '',
-    '',
-    '0',
-  ],
-  [
-    'Kunal Deshmukh',
-    'kunal.d@pict.demo-college.example',
-    '9000000024',
-    'CSE 2026',
-    'B.Tech',
-    'Computer Science',
-    '2026',
-    'CS22-102',
-    '72012302K',
-    'A',
-    'Male',
-    '02/11/2004',
-    '7.9',
-    '',
-    '86',
-    '',
-    '78',
-    '0',
-    '1',
-    '',
-    '',
-    '1',
-  ],
-];
 
 const TEMPLATE_ROWS = 600;
 
@@ -200,24 +36,49 @@ export interface StudentTemplateOptions {
    * offering these. Blank in that column means "not placed in a college yet".
    */
   collegeCodes?: string[];
+  /**
+   * The genders operations keeps, offered as a dropdown.
+   *
+   * The student's own form has offered this list for a long time; the sheet
+   * took free text, so a roster of "M" and "MALE" made every one-gender role
+   * invisible to those students.
+   */
+  genders?: string[];
+  /**
+   * The programmes this college runs, offered as a dropdown.
+   *
+   * One column, not a Course and a Branch: a college runs course-and-branch
+   * pairs, and two independent columns are what let a row be half right -
+   * the right course with the branch blank was the commonest thing that
+   * quietly left a student mapped to nothing.
+   *
+   * A university sheet spans colleges, so the list cannot be one dropdown.
+   * It gets a Programmes reference sheet instead.
+   */
+  programmes?: { label: string; collegeCode?: string }[];
+  /**
+   * What this institution collects and insists on.
+   *
+   * A column it has switched off is not printed, and one it insists on is
+   * headed and noted as required - so the sheet somebody fills in is the
+   * sheet the upload will accept, rather than a generic one they discover
+   * the rules of afterwards.
+   */
+  policy?: IntakePolicy;
 }
-
-const COLLEGE_COLUMN: Column = {
-  header: 'College code',
-  key: 'college',
-  width: 14,
-  note: 'The college’s short code, from the "Colleges" sheet. Leave blank if the college is not known yet - the student can be placed in one later, from Map data.',
-};
 
 export async function buildStudentTemplate(
   options: StudentTemplateOptions = {},
 ): Promise<ExcelJS.Buffer> {
-  // Standing inside a batch, the column is not a question anyone should answer.
-  const base = options.fixedBatchName ? COLUMNS.filter((c) => c.key !== 'batch') : COLUMNS;
-  // After Mobile: which college is the first thing a university sheet sorts on.
-  const columns = options.collegeCodes
-    ? [...base.slice(0, 3), COLLEGE_COLUMN, ...base.slice(3)]
-    : base;
+  // Standing inside a batch, the column is not a question anyone should
+  // answer. The College column only exists on a university sheet, which is
+  // the only one that spans colleges.
+  const policy = options.policy ?? defaultPolicy();
+  const columns = templateFields({ university: Boolean(options.collegeCodes) })
+    .filter((c) => !(options.fixedBatchName && c.key === 'batch'))
+    .filter((c) => isOn(policy, c.key));
+
+  const needed = (c: { key: string }) => isRequired(policy, c.key);
 
   const wb = new ExcelJS.Workbook();
   wb.creator = 'Apli.ai';
@@ -235,13 +96,13 @@ export async function buildStudentTemplate(
       type: 'pattern',
       pattern: 'solid',
       // Required columns read differently at a glance from optional ones.
-      fgColor: { argb: col?.required ? BRAND : 'FF52596A' },
+      fgColor: { argb: col && needed(col) ? BRAND : 'FF52596A' },
     };
     cell.alignment = { vertical: 'middle', horizontal: 'left' };
     cell.border = { bottom: { style: 'thin', color: { argb: RULE } } };
     if (col) {
       cell.note = {
-        texts: [{ text: `${col.required ? 'Required. ' : 'Optional. '}${col.note}` }],
+        texts: [{ text: `${needed(col) ? 'Required. ' : 'Optional. '}${col.note}` }],
       };
     }
   });
@@ -259,12 +120,15 @@ export async function buildStudentTemplate(
     cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF52596A' } };
   });
 
-  EXAMPLES.forEach((values, r) => {
-    let shown = options.fixedBatchName ? values.filter((_, i) => i !== 3) : values;
-    if (options.collegeCodes) {
-      shown = [...shown.slice(0, 3), options.collegeCodes[0] ?? 'PICT', ...shown.slice(3)];
-    }
-    const row = example.addRow(shown);
+  // Two sample students, read off the columns themselves rather than out of
+  // a parallel array of positional strings - which is how the Example sheet
+  // used to drift one column out of step with the Students sheet.
+  [0, 1].forEach((which, r) => {
+    const row = example.addRow(
+      columns.map((c) =>
+        c.key === 'college' ? (options.collegeCodes?.[0] ?? c.examples[which]!) : c.examples[which],
+      ),
+    );
     row.eachCell((cell) => {
       cell.font = { color: { argb: 'FF52596A' } };
       if (r % 2 === 1) cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: SAND } };
@@ -298,23 +162,18 @@ export async function buildStudentTemplate(
     }
   }
 
-  const codes = (options.collegeCodes ?? []).filter((c) => !c.includes(','));
-  const codesFit = codes.join(',').length < 250; // Excel's limit on an inline list
-  if (codes.length > 0 && codesFit) {
-    const collegeCol = columns.findIndex((c) => c.key === 'college') + 1;
-    for (let r = 2; r <= TEMPLATE_ROWS; r++) {
-      sheet.getCell(r, collegeCol).dataValidation = {
-        type: 'list',
-        allowBlank: true,
-        formulae: [`"${codes.join(',')}"`],
-        showErrorMessage: true,
-        errorTitle: 'Unknown college',
-        error: 'Use a code from the "Colleges" sheet, or leave it blank.',
-      };
-    }
-  }
+  /* --- the College column, on a university sheet -------------------------- */
 
+  /*
+   * Validated against a range on the Colleges sheet, not an inline list.
+   *
+   * Excel caps an inline list at 255 characters, so a university with thirty
+   * colleges used to silently get no dropdown at all - the check for it was
+   * there, and its only effect was to drop the validation without saying so.
+   * A range has no such limit.
+   */
   if (options.collegeCodes) {
+    const codes = options.collegeCodes;
     const list = wb.addWorksheet('Colleges');
     list.columns = [{ header: 'College codes', key: 'code', width: 20 }];
     const lh = list.getRow(1);
@@ -322,6 +181,87 @@ export async function buildStudentTemplate(
     lh.getCell(1).fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BRAND } };
     if (codes.length === 0) list.addRow(['No colleges yet.']).font = { color: { argb: 'FF858DA0' } };
     codes.forEach((c) => list.addRow([c]));
+
+    if (codes.length > 0) {
+      const collegeCol = columns.findIndex((c) => c.key === 'college') + 1;
+      for (let r = 2; r <= TEMPLATE_ROWS; r++) {
+        sheet.getCell(r, collegeCol).dataValidation = {
+          type: 'list',
+          allowBlank: true,
+          formulae: [`Colleges!$A$2:$A$${codes.length + 1}`],
+          showErrorMessage: true,
+          errorTitle: 'Unknown college',
+          error: 'Use a code from the "Colleges" sheet, or leave it blank.',
+        };
+      }
+    }
+  }
+
+  /* --- the Programme column ----------------------------------------------- */
+
+  const programmes = options.programmes ?? [];
+  const programmeCol = columns.findIndex((c) => c.key === 'programme') + 1;
+
+  if (programmes.length > 0 && programmeCol > 0) {
+    const list = wb.addWorksheet('Programmes');
+    list.columns = options.collegeCodes
+      ? [
+          { header: 'College', key: 'code', width: 14 },
+          { header: 'Programme', key: 'label', width: 40 },
+        ]
+      : [{ header: 'Programme', key: 'label', width: 40 }];
+    const ph = list.getRow(1);
+    ph.font = { bold: true, size: 11, color: { argb: 'FFFFFFFF' } };
+    ph.eachCell((cell) => {
+      cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: BRAND } };
+    });
+    for (const p of programmes) {
+      list.addRow(options.collegeCodes ? [p.collegeCode ?? '', p.label] : [p.label]);
+    }
+
+    /*
+     * A dropdown only on a college sheet.
+     *
+     * On a university sheet the valid programmes depend on the College code
+     * in the same row, which one flat list cannot express - offering every
+     * college's programmes in every row would be worse than offering none,
+     * because it would read as permission. The reference sheet is the
+     * honest answer there.
+     */
+    if (!options.collegeCodes) {
+      for (let r = 2; r <= TEMPLATE_ROWS; r++) {
+        sheet.getCell(r, programmeCol).dataValidation = {
+          type: 'list',
+          allowBlank: true,
+          formulae: [`Programmes!$A$2:$A$${programmes.length + 1}`],
+          showErrorMessage: true,
+          errorTitle: 'Not a programme this college runs',
+          error: 'Pick one from the "Programmes" sheet.',
+        };
+      }
+    }
+  }
+
+  /* --- the Gender column -------------------------------------------------- */
+
+  /*
+   * The same list the student's own form offers. A one-gender role groups on
+   * the spelling that was recorded, so a roster of "M" and "MALE" made those
+   * roles invisible to the students in it.
+   */
+  const genders = (options.genders ?? []).filter((g) => !g.includes(','));
+  if (genders.length > 0) {
+    const genderCol = columns.findIndex((c) => c.key === 'gender') + 1;
+    for (let r = 2; r <= TEMPLATE_ROWS; r++) {
+      sheet.getCell(r, genderCol).dataValidation = {
+        type: 'list',
+        allowBlank: true,
+        formulae: [`"${genders.join(',')}"`],
+        showErrorMessage: true,
+        errorTitle: 'Not on the list',
+        error: 'Pick one of the listed values, or leave it blank.',
+      };
+    }
   }
 
   sheet.autoFilter = { from: { row: 1, column: 1 }, to: { row: 1, column: columns.length } };

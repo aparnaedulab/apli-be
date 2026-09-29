@@ -19,16 +19,20 @@ import {
   CompanyStatus,
   JobStatus,
   PlacementType,
+  Prisma,
   PostingStatus,
   Role,
   RoundOutcome,
   RoleScope,
+  RefKind,
+  RecordSource,
 } from '@prisma/client';
 import { prisma, disconnectPrisma } from '../src/lib/prisma.js';
 import { hashPassword } from '../src/modules/auth/auth.service.js';
 import { SYSTEM_ROLES } from '../src/modules/roles/permissions.js';
 import { CORE_KEYS } from '../src/modules/tenants/catalogue.js';
 import { seedAptitude } from '../src/scripts/seedAptitude.js';
+import { setCollegePrograms } from '../src/modules/mapping/mapping.service.js';
 import { seedDepth } from './seed-depth.js';
 
 const PASSWORD = 'CampusHire2026';
@@ -68,6 +72,451 @@ async function clear() {
   await prisma.$executeRawUnsafe('SET FOREIGN_KEY_CHECKS = 1');
 }
 
+/* -------------------------------------------------------------------------- */
+/* The course catalogue, and which college runs what                           */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Courses, branches, and the two Map data layers above them.
+ *
+ * None of this was seeded before, which left a freshly seeded demo with an
+ * empty Course dropdown on every screen that has one - a student's profile, a
+ * batch, a role's criteria - while the batches themselves carried course names
+ * as plain text. Eligibility still worked, because it compares those names,
+ * but nobody could pick one.
+ *
+ * Three layers, narrowing:
+ *
+ *   Course / Specialisation   what the platform knows about at all
+ *   TenantProgram             what SPPU offers across its colleges
+ *   CollegeProgram            what PICT and VIT actually run
+ *
+ * A student picks from the last one. The catalogue is deliberately wider than
+ * either - that is the point of having three - so that narrowing is visibly
+ * doing something rather than being three copies of one list.
+ */
+async function seedPrograms() {
+  console.log('Courses, branches and Map data…');
+
+  /* The branch names first: a branch is a subject, shared across the courses
+     that teach it, so "Computer Science" is one row whether it is taught as a
+     B.Tech or an M.Tech. */
+  const BRANCHES = [
+    'Computer Science',
+    'Information Technology',
+    'Electronics and Telecommunication',
+    'Electrical',
+    'Mechanical Engineering',
+    'Civil',
+    'Data Science',
+    'Artificial Intelligence and Machine Learning',
+    'Finance',
+    'Marketing',
+  ];
+
+  const branchId = new Map<string, string>();
+  for (const name of BRANCHES) {
+    const b = await prisma.branch.create({ data: { name } });
+    branchId.set(name, b.id);
+  }
+
+  /** Every course the platform knows, and the branches each is taught in. */
+  const COURSES: Record<string, string[]> = {
+    'B.Tech': [
+      'Computer Science',
+      'Information Technology',
+      'Electronics and Telecommunication',
+      'Electrical',
+      'Mechanical Engineering',
+      'Civil',
+      'Artificial Intelligence and Machine Learning',
+    ],
+    'B.E.': ['Computer Science', 'Electronics and Telecommunication', 'Mechanical Engineering'],
+    'M.Tech': ['Computer Science', 'Electronics and Telecommunication', 'Data Science'],
+    MCA: ['Computer Science', 'Data Science'],
+    MBA: ['Finance', 'Marketing'],
+    'B.Sc': ['Computer Science', 'Data Science'],
+    'B.Com': [],
+  };
+
+  const courseId = new Map<string, string>();
+  /** courseName -> branchName -> specialisation id, for the Map data below. */
+  const specId = new Map<string, Map<string, string>>();
+
+  for (const [name, taught] of Object.entries(COURSES)) {
+    const c = await prisma.course.create({ data: { name } });
+    courseId.set(name, c.id);
+
+    const mine = new Map<string, string>();
+    for (const branch of taught) {
+      // A specialisation is a branch as offered by one course, so the pair is
+      // what makes it unique.
+      const sp = await prisma.specialisation.create({
+        data: { name: branch, courseId: c.id, branchId: branchId.get(branch)! },
+      });
+      mine.set(branch, sp.id);
+    }
+    specId.set(name, mine);
+  }
+
+  /* --- what the university offers ---------------------------------------- */
+
+  const sppu = await prisma.tenant.findFirstOrThrow({ where: { slug: 'sppu' } });
+
+  /** SPPU is an engineering-and-management university, not a medical one. */
+  const OFFERED: Record<string, string[]> = {
+    'B.Tech': [
+      'Computer Science',
+      'Information Technology',
+      'Electronics and Telecommunication',
+      'Mechanical Engineering',
+      'Civil',
+    ],
+    'M.Tech': ['Computer Science', 'Data Science'],
+    MCA: ['Computer Science'],
+    MBA: ['Finance', 'Marketing'],
+  };
+
+  for (const [course, branches] of Object.entries(OFFERED)) {
+    for (const branch of branches) {
+      await prisma.tenantProgram.create({
+        data: {
+          tenantId: sppu.id,
+          courseId: courseId.get(course)!,
+          specialisationId: specId.get(course)!.get(branch)!,
+        },
+      });
+    }
+  }
+
+  /* --- what each college runs -------------------------------------------- */
+
+  /*
+   * Taken from the batches each college already has, so the programmes and
+   * the roster cannot disagree - which is the whole failure Map data exists
+   * to prevent. Their students' own course and branch are written from the
+   * same place, as a roster import would have done, so that
+   * `setCollegePrograms` links them to the programme on the way past.
+   */
+  // SPPU's own. Another tenant's college is another tenant's business, and
+  // `setCollegePrograms` refuses it anyway.
+  const colleges = await prisma.college.findMany({
+    where: { tenantId: sppu.id },
+    select: { id: true, name: true },
+  });
+
+  for (const college of colleges) {
+    const batches = await prisma.batch.findMany({
+      where: { collegeId: college.id },
+      select: { id: true, course: true, specialisation: true },
+    });
+
+    for (const batch of batches) {
+      if (!batch.course || !batch.specialisation) continue;
+      await prisma.candidate.updateMany({
+        where: { batchMemberships: { some: { batchId: batch.id } }, course: null },
+        data: { course: batch.course, specialisation: batch.specialisation },
+      });
+    }
+
+    const pairs = new Map<string, { courseId: string; branchId: string | null; intake: number }>();
+    for (const batch of batches) {
+      const cid = batch.course ? courseId.get(batch.course) : undefined;
+      const sid = batch.specialisation ? specId.get(batch.course!)?.get(batch.specialisation) : undefined;
+      // A batch naming something the catalogue does not have is skipped
+      // rather than invented: the catalogue is the platform's, not a batch's.
+      if (!cid || !sid) continue;
+      pairs.set(`${cid}|${sid}`, { courseId: cid, branchId: sid, intake: 120 });
+    }
+    if (pairs.size === 0) continue;
+
+    // The production path, not a copy of it: it checks each pair against what
+    // the university offers and links matching students, which is exactly
+    // what a placement cell doing this by hand would get.
+    await setCollegePrograms(sppu.id, college.id, [...pairs.values()]);
+  }
+
+  const mapped = await prisma.candidate.count({ where: { collegeProgramId: { not: null } } });
+  console.log(
+    `  ${courseId.size} courses, ${BRANCHES.length} branches, ` +
+      `${await prisma.collegeProgram.count()} college programmes, ${mapped} students mapped`,
+  );
+}
+
+
+/* -------------------------------------------------------------------------- */
+/* The rest of a student profile                                               */
+/* -------------------------------------------------------------------------- */
+
+/**
+ * Fills in every field the profile asks for and no seed ever wrote.
+ *
+ * The demo had 120 students with a course, marks and a degree row, and
+ * nothing else: no date of birth, nothing under Preferences, no internship,
+ * no 10th or 12th, no student-entered qualification at all. So half the
+ * profile screen was empty on every account, the fields a role can filter on
+ * had nobody to filter, and the two features that turn on a distinction - a
+ * college row against a student's own, a declared accommodation against a
+ * role that offers one - had no second case to show.
+ *
+ * Deterministic: every value is a function of the student's position in the
+ * roster, never of `Math.random`, so the seed keeps its promise that the
+ * same students get the same numbers on every run.
+ */
+async function seedProfileDetail() {
+  console.log('Profile detail...');
+
+  const candidates = await prisma.candidate.findMany({
+    orderBy: { id: 'asc' },
+    select: {
+      id: true,
+      gender: true,
+      prn: true,
+      graduationYear: true,
+      tenthPct: true,
+      twelfthPct: true,
+      diplomaPct: true,
+      cgpa: true,
+      isLateralEntry: true,
+      activeBacklogs: true,
+      gapYears: true,
+      batchMemberships: {
+        select: { id: true, division: true, batch: { select: { graduationYear: true } } },
+      },
+    },
+  });
+
+  const ABOUT = [
+    'Final-year student. I like the part of a problem where you work out what it actually is.',
+    'I build things end to end and care most about the bit users touch.',
+    'Backend by preference. Happiest when a slow query gets fast.',
+    'I picked up data work through a college project and stayed with it.',
+    'I would rather write the test than debug it later. Usually.',
+    'Interested in systems that stay up, and learning where the sharp edges are.',
+  ];
+
+  const BOARDS = ['Maharashtra State Board', 'CBSE', 'ICSE'];
+  const SCHOOLS = [
+    'Modern High School',
+    'St. Ann\u2019s High School',
+    'Abhinav Vidyalaya',
+    'Loyola High School',
+    'New English School',
+  ];
+  const JUNIOR = ['Fergusson College', 'S. P. College', 'Nowrosjee Wadia College', 'Modern College'];
+  const POLY = ['Government Polytechnic, Pune', 'Cusrow Wadia Institute of Technology'];
+
+  const INTERNSHIPS = [
+    {
+      title: 'Backend intern',
+      org: 'Zenith Labs',
+      what: 'Wrote the reporting endpoints and the tests behind them. Took one report from nine seconds to under one by fixing an N+1.',
+    },
+    {
+      title: 'Frontend intern',
+      org: 'Northwind Analytics',
+      what: 'Built the dashboard filters and kept them working on a phone. First screen I owned end to end.',
+    },
+    {
+      title: 'Data intern',
+      org: 'Indus Systems',
+      what: 'Cleaned three years of sales data into something a model could read, and wrote down what I discarded and why.',
+    },
+    {
+      title: 'QA intern',
+      org: 'Solace Health',
+      what: 'Automated the regression pack. A day by hand became twenty minutes on a runner.',
+    },
+    {
+      title: 'Summer trainee',
+      org: 'Vertex Motors',
+      what: 'Sat with the embedded team and wrote the serial-logging tool they still use.',
+    },
+  ];
+
+  const TRAVEL_VALUES = ['NONE', 'OCCASIONAL', 'FREQUENT'];
+
+  /** Yes, no, and not-said in turn, so the three-state control shows all three. */
+  const tri = (i: number): boolean | null => (i % 3 === 0 ? true : i % 3 === 1 ? false : null);
+
+  const educations: Prisma.EducationCreateManyInput[] = [];
+  const experiences: Prisma.ExperienceCreateManyInput[] = [];
+
+  for (const [i, c] of candidates.entries()) {
+    const membership = c.batchMemberships[0];
+    const gradYear = c.graduationYear ?? membership?.batch.graduationYear ?? 2026;
+
+    /* Worked out once, because the diploma row below has to carry the same
+       number the column does - two marks for one exam is the contradiction
+       this whole pass exists to avoid. */
+    const diplomaPct =
+      c.diplomaPct ?? (c.isLateralEntry ? Math.round((62 + (i % 28)) * 100) / 100 : null);
+
+    /*
+     * The fields the depth layer already writes for its own students, so the
+     * fourteen from this file stop being the odd ones out - a demo where a
+     * seventh of the roster has no gender is a demo where a role restricted
+     * by gender quietly loses a seventh of its applicants.
+     */
+    await prisma.candidate.update({
+      where: { id: c.id },
+      data: {
+        ...(c.gender ? {} : { gender: i % 5 === 0 || i % 5 === 3 ? 'Female' : 'Male' }),
+        ...(c.prn ? {} : { prn: `PRN${gradYear}${String(90000 + i).padStart(5, '0')}` }),
+
+        // Born about 22 years before they graduate. The day is spread so a
+        // list sorted by it is not one long tie.
+        dateOfBirth: new Date(Date.UTC(gradYear - 22, i % 12, (i % 27) + 1)),
+        about: pick(ABOUT, i),
+
+        /*
+         * What they will take. All three states appear - and null is a real
+         * one here, meaning "has not said", which is what the Preferences
+         * band exists to turn into an answer.
+         */
+        openToRelocate: tri(i),
+        openToNightShift: tri(i + 1),
+        openToTravel: i % 4 === 3 ? null : pick(TRAVEL_VALUES, i),
+
+        /*
+         * A percentage as well as a CGPA for some of them. Universities are
+         * split on which they award and a role may set its bar on either, so
+         * with this column empty everywhere half of that rule was never
+         * exercised by anything.
+         */
+        ...(i % 5 === 0 && c.cgpa ? { degreePct: Math.round(Number(c.cgpa) * 9.5 * 100) / 100 } : {}),
+
+        /*
+         * A lateral entrant's diploma mark. The flag was seeded without it,
+         * so every one of them failed a role's diploma bar for want of the
+         * number the bar exists to read - which is the exact failure the
+         * column was added to prevent.
+         */
+        ...(c.isLateralEntry ? { diplomaPct } : {}),
+
+        // The two the depth layer writes and this file's fourteen never got.
+        ...(c.activeBacklogs === null ? { activeBacklogs: 0 } : {}),
+        ...(c.gapYears === null ? { gapYears: 0 } : {}),
+
+        /*
+         * A few students declare a disability, with the support they need in
+         * the same keys a role offers it in. Without a single one, neither
+         * side of that match had anything to match.
+         */
+        ...(i % 31 === 7
+          ? {
+              isPwd: true,
+              pwdCategories: [pick(['LOCOMOTOR', 'HEARING', 'VISUAL', 'LEARNING'], i)],
+              pwdPct: 40 + (i % 5) * 10,
+              accommodations: [pick(['WHEELCHAIR', 'SIGN_LANGUAGE', 'SCREEN_READER', 'EXTRA_TIME'], i)],
+            }
+          : {}),
+      },
+    });
+
+    if (membership && !membership.division) {
+      await prisma.batchMembership.update({
+        where: { id: membership.id },
+        data: { division: pick(['A', 'B'], i) },
+      });
+    }
+
+    /*
+     * School, in the student's own name.
+     *
+     * Every education row in the demo was the college's degree, which left
+     * the distinction this screen now turns on - a row the college entered
+     * against a row the student did - with only one side of it on screen.
+     * The percentages are the verified ones, so the qualification and the
+     * mark above it agree rather than being two numbers about one exam.
+     */
+    educations.push({
+      candidateId: c.id,
+      degree: 'Secondary (10th / SSC)',
+      institution: pick(SCHOOLS, i),
+      board: pick(BOARDS, i),
+      startYear: gradYear - 10,
+      endYear: gradYear - 8,
+      percentage: c.tenthPct,
+      source: RecordSource.STUDENT,
+    });
+
+    // A lateral entrant has a diploma where everybody else has a 12th, which
+    // is the whole reason the profile asks for both.
+    educations.push(
+      c.isLateralEntry
+        ? {
+            candidateId: c.id,
+            degree: 'Diploma',
+            institution: pick(POLY, i),
+            board: 'MSBTE',
+            startYear: gradYear - 8,
+            endYear: gradYear - 5,
+            percentage: diplomaPct,
+            source: RecordSource.STUDENT,
+          }
+        : {
+            candidateId: c.id,
+            degree: 'Higher Secondary (12th / HSC)',
+            institution: pick(JUNIOR, i),
+            board: pick(BOARDS, i + 1),
+            startYear: gradYear - 8,
+            endYear: gradYear - 6,
+            percentage: c.twelfthPct,
+            source: RecordSource.STUDENT,
+          },
+    );
+
+    /*
+     * An internship for two in three, with what they actually did in it.
+     * The description column has been on the table and in the resume
+     * renderer from the start with nothing ever written into it, so every
+     * built resume listed a company, two dates and no work.
+     */
+    if (i % 3 !== 2) {
+      const job = pick(INTERNSHIPS, i);
+      experiences.push({
+        candidateId: c.id,
+        title: job.title,
+        organisation: job.org,
+        location: pick(['Pune', 'Mumbai', 'Bengaluru', 'Remote'], i),
+        startDate: new Date(Date.UTC(gradYear - 1, 4, 15)),
+        endDate: new Date(Date.UTC(gradYear - 1, 6, 15)),
+        isCurrent: false,
+        description: job.what,
+      });
+    }
+  }
+
+  await prisma.education.createMany({ data: educations });
+  await prisma.experience.createMany({ data: experiences });
+
+  /* When each project ran, so a reader can tell last term's work from first
+     year's. The columns existed; the form never offered them. */
+  const projects = await prisma.project.findMany({
+    orderBy: { id: 'asc' },
+    select: { id: true, candidateId: true },
+  });
+  const gradOf = new Map(candidates.map((c) => [c.id, c.graduationYear ?? 2026]));
+  for (const [i, project] of projects.entries()) {
+    const year = (gradOf.get(project.candidateId) ?? 2026) - 1;
+    await prisma.project.update({
+      where: { id: project.id },
+      data: {
+        startDate: new Date(Date.UTC(year, i % 9, 1)),
+        endDate: new Date(Date.UTC(year, (i % 9) + 2, 1)),
+      },
+    });
+  }
+
+  console.log(
+    `  ${educations.length} school qualifications, ${experiences.length} internships, ` +
+      `${projects.length} projects dated, ` +
+      `${await prisma.candidate.count({ where: { isPwd: true } })} declared PwD`,
+  );
+}
+
+
 async function main() {
   console.log('Clearing…');
   await clear();
@@ -83,6 +532,39 @@ async function main() {
   // --- skills -------------------------------------------------------------
   await prisma.skill.createMany({ data: SKILLS.map((name) => ({ name })) });
   const skills = await prisma.skill.findMany();
+
+  /*
+   * --- the small vocabularies operations keeps ----------------------------
+   *
+   * Cities, states, NAAC grades and genders. Left out of this seed until
+   * now, which meant a freshly seeded demo had four empty dropdowns - and
+   * an empty gender list is not a cosmetic gap: gender is a bar a role can
+   * be restricted on, so a student who cannot state theirs quietly fails
+   * every restricted role and is never told why.
+   *
+   * Operations edits all of it afterwards. This is only somewhere to start.
+   */
+  console.log('Reference lists…');
+  const REFERENCE: Record<RefKind, string[]> = {
+    [RefKind.CITY]: [
+      'Pune', 'Mumbai', 'Nashik', 'Nagpur', 'Aurangabad', 'Kolhapur', 'Thane',
+      'Bengaluru', 'Hyderabad', 'Chennai', 'Delhi', 'Gurugram', 'Noida', 'Ahmedabad', 'Remote',
+    ],
+    [RefKind.STATE]: [
+      'Maharashtra', 'Karnataka', 'Telangana', 'Tamil Nadu', 'Gujarat', 'Delhi', 'Uttar Pradesh',
+    ],
+    // The grades NAAC actually awards, best first.
+    [RefKind.NAAC_GRADE]: ['A++', 'A+', 'A', 'B++', 'B+', 'B', 'C'],
+    // The four the eligibility matcher already knows how to read.
+    [RefKind.GENDER]: ['Female', 'Male', 'Other', 'Prefer not to say'],
+  };
+  for (const [kind, values] of Object.entries(REFERENCE)) {
+    await prisma.refValue.createMany({
+      // Position, so a dropdown reads in the order somebody chose rather
+      // than alphabetically - 'A++' after 'A' would be wrong.
+      data: values.map((value, position) => ({ kind: kind as RefKind, value, position })),
+    });
+  }
 
   // --- college types (operations-managed reference data) -------------------
   console.log('College types…');
@@ -349,6 +831,10 @@ async function main() {
       },
     });
 
+    /* The degree itself comes from the college's own records, so it is
+       marked as theirs: it is the evidence for the verified CGPA above it,
+       and a student who could delete it could delete the evidence and then
+       write their own. Everything they add below it stays theirs. */
     await prisma.education.create({
       data: {
         candidateId: candidate.id,
@@ -357,6 +843,7 @@ async function main() {
         startYear: 2022,
         endYear: 2026,
         cgpa: candidate.cgpa,
+        source: RecordSource.COLLEGE,
       },
     });
 
@@ -696,6 +1183,12 @@ async function main() {
   // the whole status table over ten months.
   console.log('Depth layer…');
   const depthLogins = await seedDepth(passwordHash);
+
+  // --- the course catalogue, and who runs what -----------------------------
+  await seedPrograms();
+
+  // --- the half of a profile no seed ever filled in ------------------------
+  await seedProfileDetail();
 
   // --- done ---------------------------------------------------------------
   // The shared practice bank. Idempotent on its own, so it is safe even if

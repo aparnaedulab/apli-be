@@ -182,6 +182,12 @@ const EXPECTED: Record<string, Record<string, Permission | 'open'>> = {
     'GET /students/template': 'student:write',
     'POST /batches/:id/students': 'student:write',
     'GET /batches/:id/students/template': 'student:write',
+    // The programmes a roster row is checked against, and teaching the
+    // portal a spelling for one. Both belong to entering students, not to
+    // changing what the college runs - that is batch:write, on the mapping
+    // router - so they sit under the same capability as the upload itself.
+    'GET /programmes': 'student:write',
+    'POST /programmes/:id/aliases': 'student:write',
     'POST /batches/:id/join-code': 'student:invite',
     'DELETE /batches/:id/join-code': 'student:invite',
     'DELETE /batches/:id/members/:membershipId': 'student:remove',

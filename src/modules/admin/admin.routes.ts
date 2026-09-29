@@ -9,7 +9,7 @@ import { canPublish, verifiedCompany } from '../company/verification.js';
 import { homeUniversityOf } from './colleges.bulk.js';
 import { addStudents } from '../campus/students.service.js';
 import { buildStudentTemplate } from '../campus/students.template.js';
-import { rowsFromRequest } from '../campus/students.intake.js';
+import { intakeOptions, rowsFromRequest } from '../campus/students.intake.js';
 import { asWorkbook, workbookUpload } from '../../lib/upload.js';
 import {
   batchSchema,
@@ -20,6 +20,9 @@ import {
 import { can } from '../roles/can.js';
 import { inTenant, requireTenantId } from '../tenants/tenant.context.js';
 import { operationsOverview } from './overview.service.js';
+import { activeGenders } from '../students/lists.js';
+import { assertMayAdd, policyForCollege } from '../students/policy.js';
+import { programmeIndex } from '../students/programme.js';
 
 export const adminRouter = Router();
 
@@ -159,7 +162,10 @@ adminRouter.post(
     }
 
     const rows = await rowsFromRequest(req);
-    res.status(201).json(await addStudents(collegeId, rows, req.session.userId!, { batch }));
+    assertMayAdd(await policyForCollege(collegeId), 'university');
+    const opts = intakeOptions(req);
+    const out = await addStudents(collegeId, rows, req.session.userId!, { batch, ...opts });
+    res.status(opts.dryRun ? 200 : 201).json(out);
   }),
 );
 
@@ -173,7 +179,12 @@ adminRouter.get(
     });
     if (!batch) throw notFound('No such batch.');
 
-    const buffer = await buildStudentTemplate({ fixedBatchName: batch.name });
+    const buffer = await buildStudentTemplate({
+      fixedBatchName: batch.name,
+      genders: await activeGenders(),
+      programmes: (await programmeIndex(batch.collegeId)).all,
+      policy: await policyForCollege(batch.collegeId),
+    });
     res.set(asWorkbook(`${batch.name.replace(/[^\w -]/g, '')} students.xlsx`)).send(
       Buffer.from(buffer),
     );

@@ -10,7 +10,7 @@ import { requireRole } from '../../middleware/auth.js';
 import { createInvite, inviteLinkFor } from '../invites/invite.service.js';
 import { addStudents } from '../campus/students.service.js';
 import { buildStudentTemplate } from '../campus/students.template.js';
-import { rowsFromRequest } from '../campus/students.intake.js';
+import { intakeOptions, rowsFromRequest } from '../campus/students.intake.js';
 import { asWorkbook, workbookUpload } from '../../lib/upload.js';
 import { addColleges, homeUniversityOf, parseCollegeRows } from './colleges.bulk.js';
 import { collegeQuerySchema, listColleges } from './colleges.list.js';
@@ -24,6 +24,9 @@ import { buildCollegeTemplate, parseCollegeWorkbook } from './colleges.template.
 import multer from 'multer';
 import { can } from '../roles/can.js';
 import { requireTenantId } from '../tenants/tenant.context.js';
+import { activeGenders } from '../students/lists.js';
+import { assertMayAdd, policyForCollege } from '../students/policy.js';
+import { programmeIndex } from '../students/programme.js';
 
 export const collegesRouter = Router();
 
@@ -479,7 +482,10 @@ collegesRouter.post(
     const college = await ownCollege(req, req.params.id);
 
     const rows = await rowsFromRequest(req);
-    res.status(201).json(await addStudents(college.id, rows, req.session.userId!));
+    assertMayAdd(await policyForCollege(college.id), 'university');
+    const opts = intakeOptions(req);
+    const out = await addStudents(college.id, rows, req.session.userId!, opts);
+    res.status(opts.dryRun ? 200 : 201).json(out);
   }),
 );
 
@@ -499,6 +505,9 @@ collegesRouter.get(
     const buffer = await buildStudentTemplate({
       batchNames: batches.map((b) => b.name),
       collegeName: college.name,
+      genders: await activeGenders(),
+      programmes: (await programmeIndex(college.id)).all,
+      policy: await policyForCollege(college.id),
     });
     res.set(asWorkbook('apli-students.xlsx')).send(Buffer.from(buffer));
   }),
@@ -521,6 +530,9 @@ collegesRouter.post(
 
     // The college comes from the path, not from the batch: the two are the
     // same here by construction.
-    res.status(201).json(await addStudents(req.params.id!, rows, req.session.userId!, { batch }));
+    assertMayAdd(await policyForCollege(req.params.id!), 'university');
+    const opts = intakeOptions(req);
+    const out = await addStudents(req.params.id!, rows, req.session.userId!, { batch, ...opts });
+    res.status(opts.dryRun ? 200 : 201).json(out);
   }),
 );

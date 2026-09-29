@@ -1,6 +1,7 @@
 import { prisma } from '../../lib/prisma.js';
 import { conflict, notFound } from '../../lib/errors.js';
 import { ACCOMMODATIONS, PWD_CATEGORIES, cleanKeys } from '../jobs/inclusion.js';
+import { LOCKED_NUMBER_KEYS, LOCKED_TEXT_KEYS, fieldFor } from '../students/fields.js';
 
 /**
  * Profile completion, as five weighted sections. The student sees which ones
@@ -122,17 +123,32 @@ export type LoadedProfile = Awaited<ReturnType<typeof loadProfile>>;
 /**
  * The facts a college vouches for, which a verified student may not move.
  *
- * These are what a recruiter filters on, so "verified" has to mean they are
- * still what the college checked. Everything else on a profile - a phone
- * number, a resume link, a project finished last week - is the student's own
- * account of themselves, and freezing that too was never a stronger
- * guarantee. It only produced a profile nobody could finish: five of the six
- * completion sections are the student's own, so a verified student was capped
- * at fifteen per cent and then asked by every screen to fill in the rest.
+ * Derived from the student field registry rather than written out here.
+ * These are exactly the fields a role's eligibility reads, because that is
+ * what makes them worth verifying - and the list used to be kept by hand, so
+ * six of them (the degree, diploma and postgraduate marks, live backlogs and
+ * gap years) were added to eligibility over the years and never reached the
+ * lock. A verified student could set their live backlogs to zero and walk
+ * into every role that asked for none. A test now holds the two together.
+ *
+ * Everything else on a profile - a phone number, a resume link, a project
+ * finished last week - is the student's own account of themselves, and
+ * freezing that too was never a stronger guarantee. It only produced a
+ * profile nobody could finish.
  */
-export const VERIFIED_FIELDS = ['graduationYear', 'cgpa', 'tenthPct', 'twelfthPct', 'backlogs'] as const;
+export const VERIFIED_FIELDS = LOCKED_NUMBER_KEYS;
+
+/**
+ * The same, for the ones that are names rather than numbers.
+ *
+ * Kept apart because they compare differently: case and spacing as the
+ * roster happened to have them are not a change anybody made, and neither is
+ * filling in a blank - what was never recorded was never verified.
+ */
+export const VERIFIED_TEXT_FIELDS = LOCKED_TEXT_KEYS;
 
 export type VerifiedField = (typeof VERIFIED_FIELDS)[number];
+export type VerifiedTextField = (typeof VERIFIED_TEXT_FIELDS)[number];
 
 /** The batch a student was verified in, or null if nobody has verified them. */
 export async function frozenBatchOf(candidateId: string): Promise<string | null> {
@@ -143,6 +159,13 @@ export async function frozenBatchOf(candidateId: string): Promise<string | null>
   return frozen?.batch.name ?? null;
 }
 
+/** What each locked field is called when a refusal has to name it. */
+function nameThem(keys: readonly string[]): string {
+  const labels = keys.map((k) => fieldFor(k).label.toLowerCase());
+  if (labels.length === 1) return labels[0]!;
+  return `${labels.slice(0, -1).join(', ')} and ${labels[labels.length - 1]}`;
+}
+
 /**
  * Refuses a change to a verified fact, and only to a verified fact.
  *
@@ -150,18 +173,26 @@ export async function frozenBatchOf(candidateId: string): Promise<string | null>
  * form posts the whole basics block every time - including the verified
  * values, unchanged. Refusing those would block a student from editing their
  * own phone number, which is the thing this is meant to allow.
+ *
+ * The refusal names the fields that actually moved, not the whole category:
+ * "your live backlogs are locked" is something a student can act on, where
+ * "your marks are locked" sends them to their placement cell to ask which.
  */
 export async function assertVerifiedUnchanged(
   candidateId: string,
-  incoming: Partial<Record<VerifiedField, number | null | undefined>>,
+  incoming: Record<string, unknown>,
 ): Promise<void> {
   const batch = await frozenBatchOf(candidateId);
   if (!batch) return;
 
-  const current = await prisma.candidate.findUniqueOrThrow({
+  const current = (await prisma.candidate.findUniqueOrThrow({
     where: { id: candidateId },
-    select: { graduationYear: true, cgpa: true, tenthPct: true, twelfthPct: true, backlogs: true },
-  });
+    select: Object.fromEntries(
+      [...VERIFIED_FIELDS, ...VERIFIED_TEXT_FIELDS].map((k) => [k, true]),
+    ) as Record<string, true>,
+  })) as Record<string, unknown>;
+
+  const moved: string[] = [];
 
   for (const field of VERIFIED_FIELDS) {
     const asked = incoming[field];
@@ -169,12 +200,26 @@ export async function assertVerifiedUnchanged(
     const held = current[field];
     // Decimal columns come back as objects, so both sides are compared as
     // the numbers they are.
-    const same = (held === null ? null : Number(held)) === (asked === null ? null : Number(asked));
-    if (!same) {
-      throw conflict(
-        `Your college verified your record for ${batch}, so your marks and graduating year are locked. Ask your placement cell if something there needs changing.`,
-      );
-    }
+    const num = (v: unknown) => (v === null || v === undefined ? null : Number(v));
+    if (num(held) !== num(asked)) moved.push(field);
+  }
+
+  for (const field of VERIFIED_TEXT_FIELDS) {
+    const asked = incoming[field];
+    if (asked === undefined) continue;
+    // Case and spacing as the roster happened to have them are not a change
+    // anybody made. Nor is filling in a blank: what was never recorded was
+    // never verified, and refusing it would leave a student whose college
+    // imported no branch unable to state one for the rest of their degree.
+    const tidy = (v: unknown) => String(v ?? '').trim().toLowerCase();
+    const held = tidy(current[field]);
+    if (held !== '' && held !== tidy(asked)) moved.push(field);
+  }
+
+  if (moved.length > 0) {
+    throw conflict(
+      `Your college verified your record for ${batch}, so your ${nameThem(moved)} ${moved.length === 1 ? 'is' : 'are'} locked. Ask your placement cell if something there needs changing.`,
+    );
   }
 }
 
@@ -260,6 +305,16 @@ export function serialiseProfile(candidate: LoadedProfile) {
     experiences: candidate.experiences,
     projects: candidate.projects.map((p) => ({ ...p, links: linksOf(p.links) })),
     skills,
+    /*
+     * The numbers the college holds them by, which the student could not see.
+     *
+     * A PRN is the university's own registration number and a roll number the
+     * college's; both are typed into the roster by somebody else, both appear
+     * on a hall ticket and a result, and a student who has never been shown
+     * theirs cannot notice the digit that was mistyped at import. Read-only
+     * here for the same reason the verified marks are.
+     */
+    prn: candidate.prn,
     batch: membership
       ? {
           id: membership.batch.id,
@@ -267,6 +322,8 @@ export function serialiseProfile(candidate: LoadedProfile) {
           course: membership.batch.course,
           graduationYear: membership.batch.graduationYear,
           college: membership.batch.college?.name ?? 'University-wide',
+          rollNo: membership.rollNo,
+          division: membership.division,
           isFrozen: membership.isFrozen,
           verifiedAt: membership.verifiedAt,
         }

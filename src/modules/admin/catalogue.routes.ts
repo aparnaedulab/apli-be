@@ -2,7 +2,7 @@ import { Router } from 'express';
 import { RefKind } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
-import { ACCOMMODATIONS, PWD_CATEGORIES, TRAVEL } from '../jobs/inclusion.js';
+import { ACCOMMODATIONS, DEFAULT_GENDERS, PWD_CATEGORIES, TRAVEL } from '../jobs/inclusion.js';
 
 /**
  * The course catalogue, readable by anybody signed in.
@@ -71,7 +71,16 @@ catalogueRouter.get(
       cities: of(RefKind.CITY),
       states: of(RefKind.STATE),
       naacGrades: of(RefKind.NAAC_GRADE),
-      genders: of(RefKind.GENDER),
+      /*
+       * The one reference list that may not come back empty.
+       *
+       * A blank city list is a form with a box to type in; a blank gender
+       * list is a field a student cannot answer, and gender is a bar a role
+       * can be restricted on - so not answering it silently costs them
+       * roles they would have been eligible for. Operations still keeps the
+       * list, and the first value they add replaces this entirely.
+       */
+      genders: of(RefKind.GENDER).length > 0 ? of(RefKind.GENDER) : DEFAULT_GENDERS,
       collegeTypes: collegeTypes.map((t) => ({ id: t.id, name: t.name })),
       industries: industries.map((i) => ({ id: i.id, name: i.name })),
       skills: skills.map((s) => s.name),

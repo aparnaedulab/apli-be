@@ -3,123 +3,133 @@ import { InviteKind, Prisma, Role, type Batch } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { hashPassword } from '../auth/auth.service.js';
 import { createInvite, inviteLinkFor } from '../invites/invite.service.js';
+import {
+  STUDENT_FIELDS,
+  fieldFor,
+  importFields,
+  normalise,
+  readCell,
+  FIELD_BY_HEADER,
+  type StudentFieldKey,
+} from '../students/fields.js';
+import { activeGenders, matchGender } from '../students/lists.js';
+import {
+  programmeIndex,
+  resolveProgramme,
+  type ProgrammeIndex,
+} from '../students/programme.js';
+import { isOn, missingRequired, policyFor, type IntakePolicy } from '../students/policy.js';
 
 /**
- * What a placement cell already holds about a student before that student has
- * ever signed in. Everything here comes from the college's own records, which
- * is exactly why it belongs at roster time: the numbers recruiters filter on
- * should come from the institution, not from the candidate.
+ * One row of a class list, as a spreadsheet hands it over: every cell a
+ * string, whatever the value turns out to mean.
  *
- * Name, email and mobile are required - those three are how anyone reaches the
- * student, and a roster entry without them is not usable. Everything else is
- * optional and can be filled in later, by the college or by the student.
+ * Derived from the student field registry rather than written out, so a
+ * column cannot exist on the template and be missing here - which is how the
+ * template came to print a "Graduating year" the paste box then ignored.
+ *
+ * Name, email and mobile are required: those three are how anyone reaches
+ * the student, and a roster entry without them is not usable. Everything
+ * else is optional and can be filled in later, by the college or by the
+ * student themselves.
  *
  * The batch travels with the student rather than being set up first. A class
  * list already has a class column, and making someone create batches before
  * they can paste it is a step that exists only because of how the tables are
  * shaped. Batches are created as they are met.
  */
-export interface StudentRow {
-  fullName: string;
-  email: string;
-  phone: string;
-
-  /**
-   * The college's code, for a university-level upload that spans colleges.
-   * Ignored everywhere the college is already known.
-   */
-  college?: string;
-
-  // The batch, per student. Ignored when adding from inside one.
-  batch?: string;
-  course?: string;
-  specialisation?: string;
-  graduationYear?: string;
-
-  rollNo?: string;
-  prn?: string;
-  division?: string;
-  gender?: string;
-  dateOfBirth?: string;
-  cgpa?: string;
-  degreePct?: string;
-  tenthPct?: string;
-  twelfthPct?: string;
-  /** What a lateral entrant has where a 12th standard result would be. */
-  diplomaPct?: string;
-  /** The master's, for a student already holding a degree. */
-  pgCgpa?: string;
-  pgPct?: string;
-  backlogs?: string;
-  /** Still outstanding, as against ever accumulated. */
-  activeBacklogs?: string;
-  gapYears?: string;
-}
+export type StudentRow = { fullName: string; email: string; phone: string } & Partial<
+  Record<Exclude<StudentFieldKey, 'fullName' | 'email' | 'phone'>, string>
+>;
 
 export interface AddStudentsResult {
-  created: { name: string; email: string; rollNo: string | null; batch: string; link: string }[];
+  created: {
+    name: string;
+    email: string;
+    rollNo: string | null;
+    batch: string;
+    /** Empty on a dry run, which mints no invitations. */
+    link: string;
+    /**
+     * Something worth knowing about a row that went in anyway - today only
+     * a programme that could not be matched, when the caller asked for
+     * those to be let through unmapped.
+     */
+    warning?: string;
+  }[];
   skipped: { email: string; reason: string }[];
   /** Batches that did not exist and were created along the way. */
   batchesCreated: { id: string; name: string; graduationYear: number | null }[];
+  /** True when nothing was written and this is only a report of what would be. */
+  dryRun?: boolean;
 }
 
-const dec = (v: string | undefined, max: number): Prisma.Decimal | null => {
-  if (!v?.trim()) return null;
-  const n = Number(v.trim());
-  return Number.isFinite(n) && n >= 0 && n <= max ? new Prisma.Decimal(n.toFixed(2)) : null;
-};
+/**
+ * Every cell in one row, read and bounded by the registry.
+ *
+ * Out of range is refused rather than dropped. A CGPA of 12 used to become
+ * null, which downstream reads as "no CGPA recorded" - so that student
+ * silently failed every CGPA bar and nobody was told why. All the problems
+ * in a row are collected, not just the first, because fixing a spreadsheet
+ * one error per upload is how a placement cell comes to hate this screen.
+ */
+function readRow(
+  row: StudentRow,
+  policy: IntakePolicy,
+): { ok: true; values: Record<string, unknown> } | { ok: false; reason: string } {
+  const values: Record<string, unknown> = {};
+  const problems: string[] = [];
 
-const int = (v: string | undefined): number | null => {
-  if (!v?.trim()) return null;
-  const n = Number.parseInt(v.trim(), 10);
-  return Number.isInteger(n) && n >= 0 ? n : null;
-};
+  for (const field of STUDENT_FIELDS) {
+    // A column the institution has switched off is ignored rather than
+    // refused: an old sheet still carrying it should not fail, and the
+    // value should not be stored either.
+    if (!isOn(policy, field.key)) {
+      values[field.key] = null;
+      continue;
+    }
 
-/** Accepts 2005-04-17 and 17/04/2005, which is what spreadsheets here produce. */
-const date = (v: string | undefined): Date | null => {
-  const raw = v?.trim();
-  if (!raw) return null;
+    const raw = (row as Record<string, string | undefined>)[field.key];
+    const read = readCell(field, raw);
+    if (read.ok) values[field.key] = read.value;
+    else problems.push(read.reason);
+  }
 
-  const dmy = raw.match(/^(\d{1,2})[/-](\d{1,2})[/-](\d{4})$/);
-  const iso = dmy ? `${dmy[3]}-${dmy[2]!.padStart(2, '0')}-${dmy[1]!.padStart(2, '0')}` : raw;
+  return problems.length > 0 ? { ok: false, reason: problems.join('; ') } : { ok: true, values };
+}
 
-  const parsed = new Date(iso);
-  return Number.isNaN(parsed.getTime()) ? null : parsed;
-};
-
-const text = (v: string | undefined): string | null => v?.trim() || null;
+const str = (v: unknown): string | null => (typeof v === 'string' && v.trim() ? v.trim() : null);
+const num = (v: unknown): number | null => (typeof v === 'number' ? v : null);
+const dp2 = (v: unknown): Prisma.Decimal | null =>
+  typeof v === 'number' ? new Prisma.Decimal(v.toFixed(2)) : null;
 
 export interface AddStudentsOptions {
   /** Set when adding from inside one batch, which then wins over the rows. */
   batch?: Batch;
   /**
+   * Check everything and write nothing.
+   *
+   * A strict programme check without this is a trap: a placement cell finds
+   * out that eight rows of three hundred are wrong only after the other two
+   * hundred and ninety-two have been created and invited. The preview runs
+   * every check the real thing runs - including the ones that need the
+   * database, like an email already in use - and reports the same shape.
+   */
+  dryRun?: boolean;
+  /**
+   * Let a row whose programme could not be matched through anyway, unmapped.
+   *
+   * Off by default, because an unmapped student is invisible to every role
+   * that filters on a course and nothing on their screen says so. It is
+   * offered on the preview for a cell that knows, and would rather map
+   * afterwards than stop now.
+   */
+  allowUnmapped?: boolean;
+  /**
    * The institution, needed only when there is no college: a student the
    * university has not placed in a college yet still has to belong to it.
    */
   tenantId?: string;
-}
-
-/** A college's programmes, keyed the way a row names them. */
-type ProgramIndex = Map<string, { id: string; course: string; branch: string | null }>;
-
-const programKey = (course: string, branch: string | null) =>
-  `${course.trim().toLowerCase()}|${(branch ?? '').trim().toLowerCase()}`;
-
-export async function programIndex(collegeId: string): Promise<ProgramIndex> {
-  const programs = await prisma.collegeProgram.findMany({
-    where: { collegeId },
-    select: {
-      id: true,
-      course: { select: { name: true } },
-      specialisation: { select: { name: true } },
-    },
-  });
-  return new Map(
-    programs.map((p) => [
-      programKey(p.course.name, p.specialisation?.name ?? null),
-      { id: p.id, course: p.course.name, branch: p.specialisation?.name ?? null },
-    ]),
-  );
 }
 
 /**
@@ -139,7 +149,12 @@ export async function addStudents(
   sentById: string,
   options: AddStudentsOptions = {},
 ): Promise<AddStudentsResult> {
-  const result: AddStudentsResult = { created: [], skipped: [], batchesCreated: [] };
+  const result: AddStudentsResult = {
+    created: [],
+    skipped: [],
+    batchesCreated: [],
+    ...(options.dryRun ? { dryRun: true } : {}),
+  };
 
   const tenantId =
     options.tenantId ??
@@ -153,9 +168,16 @@ export async function addStudents(
       : null);
   if (!tenantId) throw new Error('A student with no college needs an institution to belong to.');
 
-  // A row whose course and branch are a programme this college runs is
-  // mapped on the way in, so a clean upload needs no Map data step at all.
-  const programs: ProgramIndex = collegeId ? await programIndex(collegeId) : new Map();
+  // What this college actually runs, read once. A row is matched against it
+  // on the way in, so a clean upload needs no Map data step at all - and a
+  // row that matches nothing is said out loud rather than filed as unmapped.
+  const programmes: ProgrammeIndex = await programmeIndex(collegeId);
+  // Read once for the whole file, not once per student.
+  const genders = await activeGenders();
+  // What this institution collects and insists on. An institution that has
+  // never opened the policy screen gets the platform's old behaviour: name,
+  // email and mobile required, everything else offered.
+  const policy = await policyFor(tenantId);
   const seenEmails = new Set<string>();
   const seenRolls = new Set<string>();
   const seenPrns = new Set<string>();
@@ -166,15 +188,18 @@ export async function addStudents(
   for (const row of rows) {
     const email = row.email.trim().toLowerCase();
     const fullName = row.fullName.trim();
-    const phone = row.phone?.trim() ?? '';
-    const rollNo = text(row.rollNo);
-    const prn = text(row.prn);
 
-    const missing = [
-      !fullName && 'a name',
-      !email && 'an email',
-      !phone && 'a mobile number',
-    ].filter(Boolean);
+    /*
+     * What this institution insists on, which is not what the platform
+     * insists on. A university that requires a PRN says so once, on the
+     * policy screen, and every row without one is refused here by name.
+     */
+    const said = (key: string) => Boolean((row as Record<string, string | undefined>)[key]?.trim());
+    const missing = missingRequired(policy, (key) =>
+      // A sheet may name the programme in the one column or in the older
+      // Course and Branch pair. Either answers the question.
+      key === 'programme' ? said('programme') || said('course') : said(key),
+    );
 
     if (missing.length > 0) {
       result.skipped.push({
@@ -184,10 +209,28 @@ export async function addStudents(
       continue;
     }
 
-    // Loose on purpose: numbers arrive as 9000000000, +91 90000 00000 and
-    // 090000-00000. Ten digits somewhere in there is the only real check.
-    if ((phone.match(/\d/g) ?? []).length < 10) {
-      result.skipped.push({ email, reason: `"${phone}" does not look like a mobile number` });
+    /*
+     * Every remaining cell, bounded by the same rules the student's own form
+     * uses. A value outside its range is a refusal with the range in it,
+     * rather than a null that reads downstream as "never recorded".
+     */
+    const read = readRow(row, policy);
+    if (!read.ok) {
+      result.skipped.push({ email, reason: read.reason });
+      continue;
+    }
+    const cell = read.values;
+
+    const phone = str(cell.phone) ?? '';
+    const rollNo = str(cell.rollNo);
+    const prn = str(cell.prn);
+
+    // Checked against the list operations keeps, and rewritten to its
+    // spelling: a one-gender role groups on what was recorded, so "M" where
+    // the list says "Male" makes that role invisible.
+    const gender = matchGender(str(cell.gender), genders);
+    if (!gender.ok) {
+      result.skipped.push({ email, reason: gender.reason });
       continue;
     }
     if (seenEmails.has(email)) {
@@ -198,7 +241,15 @@ export async function addStudents(
 
     let batch: Batch;
     try {
-      batch = await resolveBatch(collegeId, tenantId, row, options.batch, batchCache, result);
+      batch = await resolveBatch(
+        collegeId,
+        tenantId,
+        row,
+        options.batch,
+        batchCache,
+        result,
+        options.dryRun ?? false,
+      );
     } catch (err) {
       result.skipped.push({
         email,
@@ -241,13 +292,79 @@ export async function addStudents(
         continue;
       }
 
+      /*
+       * Which of the college's programmes this is.
+       *
+       * The row first, the batch as a fallback: a batch called "Second year"
+       * has no course to lend, and that must not leave a student without one
+       * when their own row said B.Tech.
+       *
+       * A row that matches nothing is refused with the college's own list in
+       * the message, rather than stored with the names as typed and the link
+       * left null - which is what made a "B.Com" at a college running BCPM
+       * invisible to every BCPM role, silently, for three years.
+       */
+      const resolved = resolveProgramme(programmes, {
+        programme: str(cell.programme),
+        course: str(cell.course) ?? batch.course,
+        branch: str(cell.specialisation) ?? batch.specialisation,
+      });
+
+      if (resolved.problem && !options.allowUnmapped) {
+        result.skipped.push({ email, reason: resolved.problem });
+        continue;
+      }
+
+      const candidateData = {
+        collegeId,
+        course: resolved.course,
+        specialisation: resolved.branch,
+        collegeProgramId: resolved.programme?.id ?? null,
+        graduationYear: num(cell.graduationYear) ?? batch.graduationYear,
+        prn,
+        phone,
+        gender: gender.value,
+        dateOfBirth: (cell.dateOfBirth as Date | null) ?? null,
+        cgpa: dp2(cell.cgpa),
+        degreePct: dp2(cell.degreePct),
+        tenthPct: dp2(cell.tenthPct),
+        twelfthPct: dp2(cell.twelfthPct),
+        diplomaPct: dp2(cell.diplomaPct),
+        // Joined in the second year through a diploma. The column that
+        // exists solely for these students - Diploma % - was importable
+        // long before the fact itself was, so a college could record the
+        // consequence and not the cause.
+        isLateralEntry: (cell.isLateralEntry as boolean | null) ?? false,
+        // The bachelor's lives in cgpa/degreePct above; these are the
+        // MCA or M.Tech on top of it, blank for most of a roster.
+        pgCgpa: dp2(cell.pgCgpa),
+        pgPct: dp2(cell.pgPct),
+        backlogs: num(cell.backlogs),
+        // Two different criteria on every campus criteria sheet: "no live
+        // backlogs" and "no more than two ever". Recorded apart, because
+        // a role may ask about either and a missing one fails its bar.
+        activeBacklogs: num(cell.activeBacklogs),
+        gapYears: num(cell.gapYears),
+      };
+
+      // Everything above has been checked. On a preview that is the whole
+      // job - nothing is written, no invitation is minted, and the row is
+      // reported exactly as the real run would report it.
+      if (options.dryRun) {
+        result.created.push({
+          name: fullName,
+          email,
+          rollNo,
+          batch: batch.name,
+          link: '',
+          ...(resolved.problem ? { warning: resolved.problem } : {}),
+        });
+        continue;
+      }
+
       // Unguessable and never shared: the account is unusable until the student
       // sets their own password through the activation link.
       const placeholder = await hashPassword(randomBytes(32).toString('hex'));
-
-      const course = text(row.course) ?? batch.course;
-      const branch = text(row.specialisation) ?? batch.specialisation;
-      const program = course ? programs.get(programKey(course, branch)) : undefined;
 
       const user = await prisma.$transaction(async (tx) => {
         const created = await tx.user.create({
@@ -263,46 +380,14 @@ export async function addStudents(
           },
         });
         const candidate = await tx.candidate.create({
-          data: {
-            userId: created.id,
-            collegeId,
-            // The row first, the batch as a fallback. A batch called "Second
-            // year" has no course to lend, and that must not leave the student
-            // without one when their own row said B.Tech.
-            //
-            // A match with one of the college's programmes takes that
-            // programme's spelling, so "b.tech" in a sheet reads as B.Tech.
-            course: program?.course ?? course,
-            specialisation: program ? program.branch : branch,
-            collegeProgramId: program?.id ?? null,
-            graduationYear: int(row.graduationYear) ?? batch.graduationYear,
-            prn,
-            phone,
-            gender: text(row.gender),
-            dateOfBirth: date(row.dateOfBirth),
-            cgpa: dec(row.cgpa, 10),
-            degreePct: dec(row.degreePct, 100),
-            tenthPct: dec(row.tenthPct, 100),
-            twelfthPct: dec(row.twelfthPct, 100),
-            diplomaPct: dec(row.diplomaPct, 100),
-            // The bachelor's lives in cgpa/degreePct above; these are the
-            // MCA or M.Tech on top of it, blank for most of a roster.
-            pgCgpa: dec(row.pgCgpa, 10),
-            pgPct: dec(row.pgPct, 100),
-            backlogs: int(row.backlogs),
-            // Two different criteria on every campus criteria sheet: "no live
-            // backlogs" and "no more than two ever". Recorded apart, because
-            // a role may ask about either and a missing one fails its bar.
-            activeBacklogs: int(row.activeBacklogs),
-            gapYears: int(row.gapYears),
-          },
+          data: { userId: created.id, ...candidateData },
         });
         await tx.batchMembership.create({
           data: {
             batchId: batch.id,
             candidateId: candidate.id,
             rollNo,
-            division: text(row.division),
+            division: str(cell.division),
           },
         });
         return created;
@@ -323,6 +408,7 @@ export async function addStudents(
         rollNo,
         batch: batch.name,
         link: inviteLinkFor(token),
+        ...(resolved.problem ? { warning: resolved.problem } : {}),
       });
     } catch (err) {
       result.skipped.push({
@@ -337,6 +423,16 @@ export async function addStudents(
 
 /** Where students go when the list did not say. */
 export const UNASSIGNED = 'Unassigned';
+
+/**
+ * The graduating year a new batch takes from the first row that mentions
+ * one. Bounded like the column it becomes; anything else leaves the batch
+ * without a year, which is perfectly usable.
+ */
+function yearOf(raw: string | undefined): number | null {
+  const read = readCell(fieldFor('graduationYear'), raw);
+  return read.ok ? ((read.value as number | null) ?? null) : null;
+}
 
 /**
  * Finds the batch a row belongs to, creating it if this is the first student
@@ -357,6 +453,7 @@ async function resolveBatch(
   fixed: Batch | undefined,
   cache: Map<string, Batch>,
   result: AddStudentsResult,
+  dryRun: boolean,
 ): Promise<Batch> {
   // Adding from inside a batch: that batch wins, whatever the row says.
   if (fixed) return fixed;
@@ -364,7 +461,7 @@ async function resolveBatch(
   // A paste with no batch column at all still has to land somewhere, so it
   // lands in one group per college rather than being refused. It can be
   // renamed, or its students moved, afterwards.
-  const name = text(row.batch) ?? UNASSIGNED;
+  const name = row.batch?.trim() || UNASSIGNED;
 
   const key = name.toLowerCase();
   const cached = cache.get(key);
@@ -377,16 +474,28 @@ async function resolveBatch(
     return existing;
   }
 
-  const created = await prisma.batch.create({
-    data: {
-      collegeId,
-      tenantId,
-      name,
-      course: text(row.course),
-      specialisation: text(row.specialisation),
-      graduationYear: int(row.graduationYear),
-    },
-  });
+  const data = {
+    collegeId,
+    tenantId,
+    name,
+    course: row.course?.trim() || null,
+    specialisation: row.specialisation?.trim() || null,
+    graduationYear: yearOf(row.graduationYear),
+  };
+
+  /*
+   * A preview reports the batch it would create without creating it.
+   *
+   * This is the other half of why the preview matters. A batch is made from
+   * whatever name a row happens to carry, so "CSE 2026" and "CSE-2026" in
+   * one file quietly become two classes - and until now nothing asked
+   * first. The stub carries no id, which is harmless: the only thing read
+   * off it afterwards is a roll-number check against a batch that by
+   * definition has no members yet.
+   */
+  const created = dryRun
+    ? ({ ...data, id: '', studyYear: null, headOfDept: null } as unknown as Batch)
+    : await prisma.batch.create({ data });
 
   cache.set(key, created);
   result.batchesCreated.push({
@@ -402,70 +511,30 @@ async function resolveBatch(
 /* -------------------------------------------------------------------------- */
 
 /**
- * Header names are matched loosely - "Roll No.", "roll_no" and "ROLLNO" all
- * mean the same column - because the alternative is telling a placement officer
- * to reformat a spreadsheet they did not write.
- */
-export const HEADERS: Record<keyof StudentRow, string[]> = {
-  fullName: ['name', 'fullname', 'studentname', 'student'],
-  email: ['email', 'emailid', 'emailaddress', 'mail'],
-  phone: ['phone', 'mobile', 'mobileno', 'contact', 'contactno', 'phoneno'],
-  college: ['college', 'collegecode', 'institute', 'institutecode'],
-  batch: ['batch', 'class', 'batchname'],
-  course: ['course', 'degree', 'programme', 'program'],
-  specialisation: ['specialisation', 'specialization', 'branch', 'stream'],
-  graduationYear: [
-    'year',
-    'graduationyear',
-    'graduatingyear',
-    'passingyear',
-    'passoutyear',
-    'batchyear',
-  ],
-  rollNo: ['rollno', 'roll', 'rollnumber'],
-  prn: ['prn', 'enrolmentno', 'enrollmentno', 'enrolmentnumber', 'registrationno', 'universityid'],
-  division: ['division', 'div', 'section'],
-  gender: ['gender', 'sex'],
-  dateOfBirth: ['dob', 'dateofbirth', 'birthdate'],
-  cgpa: ['cgpa', 'gpa', 'sgpa'],
-  degreePct: ['percentage', 'percent', 'degreepercentage', 'aggregate', 'marks'],
-  diplomaPct: ['diploma', 'diplomapercentage', 'diplomapct', 'diplomamarks'],
-  pgCgpa: ['pgcgpa', 'postgraduationcgpa', 'mastercgpa', 'mtechcgpa', 'mcacgpa'],
-  pgPct: ['pg', 'pgpercentage', 'pgpct', 'pgmarks', 'postgraduationpercentage', 'masterpercentage'],
-  activeBacklogs: ['activebacklogs', 'livebacklogs', 'currentbacklogs', 'standingarrears', 'activearrears'],
-  gapYears: ['gapyears', 'gap', 'yeargap', 'educationgap', 'breakinstudies'],
-  tenthPct: ['10th', 'tenth', '10thpercentage', 'sscpercentage', 'ssc', 'x'],
-  twelfthPct: ['12th', 'twelfth', '12thpercentage', 'hscpercentage', 'hsc', 'xii'],
-  backlogs: ['backlogs', 'backlog', 'backlogstotal', 'totalbacklogs', 'kt', 'kts', 'atkt', 'deadbacklogs'],
-};
-
-export const normalise = (s: string) => s.toLowerCase().replace(/[^a-z0-9]/g, '');
-
-/**
- * Header text to field, built from HEADERS.
+ * Header text to field, and the spellings each field answers to.
  *
- * One map, shared with the spreadsheet reader. Two alias lists is how the
- * template came to print a "Graduating year" column that the paste box then
- * silently ignored.
+ * Both now live in the field registry, with the column that prints them, so
+ * the template and the paste box cannot disagree - which they did: the
+ * template printed a "Graduating year" column the paste box silently
+ * ignored. Re-exported here because callers already import them from this
+ * module.
  */
-export const FIELD_BY_HEADER = new Map<string, keyof StudentRow>(
-  (Object.entries(HEADERS) as [keyof StudentRow, string[]][]).flatMap(([field, aliases]) =>
-    aliases.map((alias) => [alias, field] as [string, keyof StudentRow]),
-  ),
+export { normalise, FIELD_BY_HEADER } from '../students/fields.js';
+
+/** The aliases, keyed by field, for anything that still wants them that way. */
+export const HEADERS: Record<string, readonly string[]> = Object.fromEntries(
+  STUDENT_FIELDS.map((f) => [f.key, [normalise(f.header), ...f.aliases]]),
 );
 
-function headerMap(cells: string[]): Partial<Record<number, keyof StudentRow>> | null {
-  const map: Partial<Record<number, keyof StudentRow>> = {};
+function headerMap(cells: string[]): Partial<Record<number, StudentFieldKey>> | null {
+  const map: Partial<Record<number, StudentFieldKey>> = {};
   let matched = 0;
 
   cells.forEach((cell, i) => {
-    const key = normalise(cell);
-    for (const [field, aliases] of Object.entries(HEADERS) as [keyof StudentRow, string[]][]) {
-      if (aliases.includes(key)) {
-        map[i] = field;
-        matched++;
-        return;
-      }
+    const field = FIELD_BY_HEADER.get(normalise(cell));
+    if (field) {
+      map[i] = field;
+      matched++;
     }
   });
 

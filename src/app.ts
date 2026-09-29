@@ -43,6 +43,7 @@ import {
 } from './modules/assessments/assessment.routes.js';
 import { notificationRouter } from './modules/notifications/notification.routes.js';
 import { noticeRouter } from './modules/notices/notice.routes.js';
+import { mailRouter } from './modules/mail/mail.routes.js';
 import {
   campusDrivesRouter,
   candidateDrivesRouter,
@@ -72,6 +73,8 @@ import { platformBulkRouter } from './modules/tenants/bulk.routes.js';
 import { publicTenantRouter } from './modules/publicTenant/publicTenant.routes.js';
 import { companyAccessRouter } from './modules/companyAccess/companyAccess.routes.js';
 import { institutionRulesRouter } from './modules/admin/institutionRules.routes.js';
+import { intakeRouter } from './modules/students/intake.routes.js';
+import { registerRouter } from './modules/students/register.routes.js';
 import {
   adminMappingRouter,
   campusMappingRouter,
@@ -159,11 +162,15 @@ export function createApp(): Express {
   // Institution notices. The GET is open to every role - the router decides
   // who a notice was addressed to - and everything that writes is ADMIN only.
   api.use('/notices', noticeRouter);
+  api.use('/mail', mailRouter);
   // Before /platform, so the bulk router's own guards apply to its paths.
   api.use('/platform/bulk', platformBulkRouter);
   api.use('/platform/tenants/:tenantId/mapping', platformMappingRouter);
   api.use('/platform', platformRouter);
   api.use('/public', publicTenantRouter);
+  // A student putting themselves on their college's roster, when the
+  // institution has switched that on.
+  api.use('/public', registerRouter);
   api.use('/company-access', companyAccessRouter);
   api.use('/files', filesRouter);
   // Phase 1, the trust core. Each router fences itself (role, module, scope).
@@ -200,6 +207,7 @@ export function createApp(): Express {
   api.use('/admin/access', accessRouter);
   // Before /admin, so its own guards apply to its paths.
   api.use('/admin/institution-rules', institutionRulesRouter);
+  api.use('/admin/student-intake', intakeRouter);
   api.use('/admin/mapping', adminMappingRouter);
   api.use('/admin', adminRouter);
   api.use('/campus/placements', placementsRouter);

@@ -34,6 +34,121 @@ export interface OfferedCourse {
 }
 
 /**
+ * Where a list of courses came from, which decides whether it is closed.
+ *
+ * `college` and `university` are somebody's deliberate selection, so the
+ * student picks from it and nothing else. `catalogue` is the fallback - every
+ * course on the platform, because nobody has narrowed it yet - and a list
+ * that wide cannot be the only answer a student is allowed to give.
+ */
+export type ProgramSource = 'college' | 'university' | 'catalogue';
+
+/**
+ * The courses and branches one student may say they are on.
+ *
+ * Their college's programmes first, because that is the list that is actually
+ * true of them; the university's if the college has not been mapped yet; the
+ * shared catalogue if neither has. Anything wider than their own college is a
+ * list that contains courses nobody at their college has ever studied, and a
+ * student who picks one of those matches no role's course criterion and is
+ * told nothing about why.
+ */
+export async function programsForCandidate(
+  candidateId: string,
+): Promise<{ courses: OfferedCourse[]; source: ProgramSource }> {
+  const candidate = await prisma.candidate.findUnique({
+    where: { id: candidateId },
+    select: { collegeId: true, college: { select: { tenantId: true } } },
+  });
+
+  if (candidate?.collegeId) {
+    const programs = await prisma.collegeProgram.findMany({
+      where: { collegeId: candidate.collegeId },
+      select: {
+        course: { select: { id: true, name: true } },
+        specialisation: { select: { id: true, name: true } },
+      },
+    });
+
+    if (programs.length > 0) {
+      /*
+       * Flattened back into course-with-branches, because that is the shape a
+       * pair of dropdowns needs. A course the college runs with no branch at
+       * all - an MBA - keeps an empty branch list rather than disappearing.
+       */
+      const byCourse = new Map<string, OfferedCourse>();
+      for (const p of programs) {
+        const course = byCourse.get(p.course.id) ?? { ...p.course, branches: [] };
+        if (p.specialisation && !course.branches.some((b) => b.id === p.specialisation!.id)) {
+          course.branches.push(p.specialisation);
+        }
+        byCourse.set(p.course.id, course);
+      }
+
+      const courses = [...byCourse.values()].sort((a, z) => a.name.localeCompare(z.name));
+      for (const c of courses) c.branches.sort((a, z) => a.name.localeCompare(z.name));
+      return { courses, source: 'college' };
+    }
+  }
+
+  const tenantId = candidate?.college?.tenantId;
+  if (!tenantId) return { courses: await everyCourse(), source: 'catalogue' };
+
+  const { courses, fromCatalogue } = await offeredPrograms(tenantId);
+  return { courses, source: fromCatalogue ? 'catalogue' : 'university' };
+}
+
+/** The shared catalogue, when nobody above has narrowed it. */
+async function everyCourse(): Promise<OfferedCourse[]> {
+  const courses = await prisma.course.findMany({
+    where: { isActive: true },
+    orderBy: { name: 'asc' },
+    select: {
+      id: true,
+      name: true,
+      specialisations: {
+        where: { isActive: true },
+        orderBy: { name: 'asc' },
+        select: { id: true, name: true },
+      },
+    },
+  });
+  return courses.map((c) => ({ id: c.id, name: c.name, branches: c.specialisations }));
+}
+
+/**
+ * The programme a course-and-branch pair names at a college, if it names one.
+ *
+ * Matched on the names rather than ids because the names are what the student
+ * picked and what every eligibility check reads. Case-insensitive, since a
+ * roster imported from a spreadsheet and a catalogue row rarely agree on it.
+ */
+export async function programByNames(
+  collegeId: string,
+  course: string,
+  branch: string | null,
+): Promise<{ id: string; course: string; branch: string | null } | null> {
+  const programs = await prisma.collegeProgram.findMany({
+    where: { collegeId },
+    select: {
+      id: true,
+      course: { select: { name: true } },
+      specialisation: { select: { name: true } },
+    },
+  });
+
+  const same = (a: string | null, b: string | null) =>
+    (a ?? '').trim().toLowerCase() === (b ?? '').trim().toLowerCase();
+
+  const found = programs.find(
+    (p) => same(p.course.name, course) && same(p.specialisation?.name ?? null, branch),
+  );
+  return found
+    ? { id: found.id, course: found.course.name, branch: found.specialisation?.name ?? null }
+    : null;
+}
+
+/**
  * The courses and branches the university offers.
  *
  * TenantProgram is the university's own selection; a row with no branch means

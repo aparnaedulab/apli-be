@@ -1,10 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
 import { prisma } from '../../lib/prisma.js';
-import { badRequest, notFound } from '../../lib/errors.js';
+import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { documentUpload } from '../../lib/upload.js';
 import { isAssetRef, removeAsset, saveTenantAsset } from '../tenants/assets.js';
-import { Prisma, ResumeSource } from '@prisma/client';
+import { Prisma, RecordSource, ResumeSource } from '@prisma/client';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import { badgesFor } from './badges.js';
 import { requireCandidateId, requireRole } from '../../middleware/auth.js';
@@ -17,6 +17,9 @@ import {
   setSkills,
 } from './candidate.service.js';
 import { ACCOMMODATIONS, PWD_CATEGORIES, TRAVEL, cleanKeys } from '../jobs/inclusion.js';
+import { programByNames, programsForCandidate } from '../mapping/mapping.service.js';
+import { sharedBasicsShape, type SharedBasics } from '../students/schema.js';
+import { activeGenders, matchGender } from '../students/lists.js';
 
 export const candidateRouter = Router();
 
@@ -24,11 +27,19 @@ candidateRouter.use(requireRole('CANDIDATE'));
 
 const optionalText = (max: number) => z.string().trim().max(max).optional().or(z.literal(''));
 
+/**
+ * The basics block.
+ *
+ * Two halves. The first is generated from the student field registry: every
+ * fact a college could also have put on a class list, bounded by exactly the
+ * rules the upload uses. The second is written out here, because it is the
+ * part only a student can ever set and so has no second door to agree with.
+ */
 const basicsSchema = z.object({
-  phone: optionalText(20),
-  gender: optionalText(30),
-  dateOfBirth: z.string().datetime().optional().or(z.literal('')),
-  graduationYear: z.coerce.number().int().min(2000).max(2100).optional(),
+  /* --- the same facts the class-list upload carries --------------------- */
+  ...(sharedBasicsShape as Record<string, z.ZodTypeAny>),
+
+  /* --- and the part that is theirs alone --------------------------------- */
   headline: optionalText(140),
   about: optionalText(2000),
   /*
@@ -47,27 +58,6 @@ const basicsSchema = z.object({
     )
     .optional()
     .or(z.literal('')),
-  /*
-   * What a role's eligibility actually reads.
-   *
-   * Every bar a company can set has a column here, and until now the form
-   * offered four of them - so a student could clear a role's diploma or
-   * postgraduate bar on paper and be refused by it in the query, with
-   * nowhere to put the number that would have let them through.
-   */
-  course: optionalText(120),
-  specialisation: optionalText(120),
-  cgpa: z.coerce.number().min(0).max(10).optional(),
-  degreePct: z.coerce.number().min(0).max(100).optional(),
-  tenthPct: z.coerce.number().min(0).max(100).optional(),
-  twelfthPct: z.coerce.number().min(0).max(100).optional(),
-  diplomaPct: z.coerce.number().min(0).max(100).optional(),
-  pgCgpa: z.coerce.number().min(0).max(10).optional(),
-  pgPct: z.coerce.number().min(0).max(100).optional(),
-  backlogs: z.coerce.number().int().min(0).max(50).optional(),
-  activeBacklogs: z.coerce.number().int().min(0).max(50).optional(),
-  gapYears: z.coerce.number().int().min(0).max(20).optional(),
-  isLateralEntry: z.boolean().optional(),
 
   /*
    * Declared, never inferred, and never a gate.
@@ -76,6 +66,10 @@ const basicsSchema = z.object({
    * the same keys from the student's side, so the two can be matched. Unknown
    * keys are dropped rather than refused - a list that grows should not
    * invalidate a form somebody is halfway through.
+   *
+   * Not on the class-list upload, deliberately: this is the student's own
+   * declaration, and a disability recorded off a departmental spreadsheet is
+   * not one anybody consented to share.
    */
   isPwd: z.boolean().optional(),
   pwdCategories: z.array(z.string()).max(PWD_CATEGORIES.length).optional(),
@@ -85,7 +79,20 @@ const basicsSchema = z.object({
   openToRelocate: z.boolean().optional(),
   openToNightShift: z.boolean().optional(),
   openToTravel: z.enum(TRAVEL).optional().or(z.literal('')),
-});
+}) as unknown as z.ZodType<
+  SharedBasics & {
+    headline?: string;
+    about?: string;
+    resumeUrl?: string;
+    isPwd?: boolean;
+    pwdCategories?: string[];
+    pwdPct?: number;
+    accommodations?: string[];
+    openToRelocate?: boolean;
+    openToNightShift?: boolean;
+    openToTravel?: (typeof TRAVEL)[number] | '';
+  }
+>;
 
 const educationSchema = z.object({
   degree: z.string().trim().min(1, 'Enter the degree.').max(120),
@@ -158,12 +165,77 @@ function defaultName(build: { layout?: string }): string {
 const nullable = (v: string | undefined) => (v ? v : null);
 const nullableDate = (v: string | undefined) => (v ? new Date(v) : null);
 
+/**
+ * What `collegeProgramId` should become when the course or branch is saved.
+ *
+ * Returns the patch to merge in, which is `{}` when neither name was sent -
+ * a student saving their backlogs is not restating their course, and must
+ * not have their mapping rewritten as a side effect of it.
+ *
+ * A college with no programmes mapped yet has nothing to check against, so
+ * the names are taken as given and the link is left alone. Once it has any,
+ * the pair must be one of them: a course its college does not run is a
+ * course that fails every role's criterion, and refusing it here is the only
+ * place a student ever finds that out.
+ */
+async function programFor(
+  candidateId: string,
+  course: string | undefined,
+  branch: string | undefined,
+): Promise<{ collegeProgramId?: string | null }> {
+  if (course === undefined && branch === undefined) return {};
+
+  const candidate = await prisma.candidate.findUniqueOrThrow({
+    where: { id: candidateId },
+    select: { collegeId: true, course: true, specialisation: true },
+  });
+  if (!candidate.collegeId) return {};
+
+  // Either one may be absent; the other is whatever is already stored.
+  const wantCourse = (course ?? candidate.course ?? '').trim();
+  const wantBranch = (branch ?? candidate.specialisation ?? '').trim() || null;
+  if (!wantCourse) return { collegeProgramId: null };
+
+  const { source } = await programsForCandidate(candidateId);
+  if (source !== 'college') return {};
+
+  const program = await programByNames(candidate.collegeId, wantCourse, wantBranch);
+  if (!program) {
+    throw badRequest(
+      wantBranch
+        ? `Your college does not run ${wantCourse} – ${wantBranch}. Pick one of its programmes, or ask your placement cell to add it.`
+        : `Choose the branch of ${wantCourse} you are on.`,
+    );
+  }
+
+  return { collegeProgramId: program.id };
+}
+
 /** GET /api/candidate/profile */
 candidateRouter.get(
   '/profile',
   asyncHandler(async (req, res) => {
     const candidate = await loadProfile(requireCandidateId(req));
     res.json({ profile: serialiseProfile(candidate) });
+  }),
+);
+
+/**
+ * GET /api/candidate/programs
+ *
+ * The courses and branches this student may say they are on.
+ *
+ * Separate from `/api/catalogue`, which is every course on the platform and
+ * right for the screens that keep that list. A student is on one of their own
+ * college's programmes; offering them the platform's is offering a course
+ * nobody at their college has ever studied, which then matches no role and
+ * explains nothing. `source` says whose list came back, so the form knows
+ * whether it may still let somebody type their own.
+ */
+candidateRouter.get(
+  '/programs',
+  asyncHandler(async (req, res) => {
+    res.json(await programsForCandidate(requireCandidateId(req)));
   }),
 );
 
@@ -192,13 +264,37 @@ candidateRouter.patch(
      * their college checked is refused only if they actually tried to move
      * it - see assertVerifiedUnchanged.
      */
-    await assertVerifiedUnchanged(candidateId, {
-      graduationYear: data.graduationYear,
-      cgpa: data.cgpa,
-      tenthPct: data.tenthPct,
-      twelfthPct: data.twelfthPct,
-      backlogs: data.backlogs,
-    });
+    await assertVerifiedUnchanged(candidateId, data as Record<string, unknown>);
+
+    /*
+     * Gender, against the list operations keeps.
+     *
+     * The form has offered that list as a dropdown for a long time, but
+     * nothing checked what actually arrived - and a role open to one gender
+     * groups on the recorded spelling, so "M" where the list says "Male"
+     * made that role invisible to them. Rewritten to the list's spelling for
+     * the same reason.
+     */
+    let gender = data.gender;
+    if (gender !== undefined) {
+      const matched = matchGender(gender || null, await activeGenders());
+      if (!matched.ok) throw badRequest(matched.reason);
+      gender = matched.value ?? '';
+    }
+
+    /*
+     * The course and branch, checked against the programmes their college
+     * actually runs, and the Map data link moved with them.
+     *
+     * These two names are not decoration: every eligibility check reads them
+     * (jobs/visibility.ts), and `collegeProgramId` is what a college's
+     * reports count by. Writing the names straight through left the two
+     * disagreeing - the link said CSE, the names said Mechanical - and
+     * nothing anywhere said so. A college that has mapped its programmes
+     * gets a closed list; one that has not is left free to type, because the
+     * alternative is a student who cannot record their own course at all.
+     */
+    const program = await programFor(candidateId, data.course, data.specialisation);
 
     /*
      * Nothing is written unless it was actually sent.
@@ -215,7 +311,7 @@ candidateRouter.patch(
       where: { id: candidateId },
       data: {
         ...given('phone', nullable),
-        ...given('gender', nullable),
+        ...(gender === undefined ? {} : { gender: nullable(gender) }),
         ...given('dateOfBirth', nullableDate),
         ...given('headline', nullable),
         ...given('about', nullable),
@@ -223,6 +319,7 @@ candidateRouter.patch(
         ...given('graduationYear'),
         ...given('course', nullable),
         ...given('specialisation', nullable),
+        ...program,
         ...given('cgpa'),
         ...given('degreePct'),
         ...given('tenthPct'),
@@ -436,6 +533,8 @@ function mountSection<S extends z.ZodTypeAny>(
   name: SectionName,
   schema: S,
   toData: (input: z.infer<S>) => Record<string, unknown>,
+  /** Runs before an edit or a delete, and throws if the row is not theirs. */
+  guard?: (candidateId: string, id: string) => Promise<void>,
 ) {
   const model = {
     education: prisma.education,
@@ -463,6 +562,7 @@ function mountSection<S extends z.ZodTypeAny>(
     asyncHandler(async (req, res) => {
       const candidateId = requireCandidateId(req);
       const input = schema.parse(req.body);
+      await guard?.(candidateId, req.params.id!);
 
       // Scoped by candidateId as well as id, so one student cannot edit
       // another student's row by guessing its id.
@@ -480,6 +580,7 @@ function mountSection<S extends z.ZodTypeAny>(
     `${path}/:id`,
     asyncHandler(async (req, res) => {
       const candidateId = requireCandidateId(req);
+      await guard?.(candidateId, req.params.id!);
 
       const result = await model.deleteMany({ where: { id: req.params.id, candidateId } });
       if (result.count === 0) throw notFound('That entry does not exist.');
@@ -489,15 +590,39 @@ function mountSection<S extends z.ZodTypeAny>(
   );
 }
 
-mountSection('/education', 'education', educationSchema, (d) => ({
-  degree: d.degree,
-  institution: d.institution,
-  board: nullable(d.board),
-  startYear: d.startYear,
-  endYear: d.endYear ?? null,
-  cgpa: d.cgpa ?? null,
-  percentage: d.percentage ?? null,
-}));
+mountSection(
+  '/education',
+  'education',
+  educationSchema,
+  (d) => ({
+    degree: d.degree,
+    institution: d.institution,
+    board: nullable(d.board),
+    startYear: d.startYear,
+    endYear: d.endYear ?? null,
+    cgpa: d.cgpa ?? null,
+    percentage: d.percentage ?? null,
+  }),
+  /*
+   * A qualification the college entered is not the student's to remove.
+   *
+   * It is the same fact as the verified marks, arriving through the same
+   * door - and the marks are locked while the row carrying the evidence for
+   * them was not, so a student could delete it and write their own. The
+   * refusal says who to ask rather than only saying no.
+   */
+  async (candidateId, id) => {
+    const row = await prisma.education.findFirst({
+      where: { id, candidateId },
+      select: { source: true, degree: true },
+    });
+    if (row?.source === RecordSource.COLLEGE) {
+      throw conflict(
+        `${row.degree} was entered by your college, so it is part of your verified record and cannot be changed here. Ask your placement cell if it is wrong.`,
+      );
+    }
+  },
+);
 
 mountSection('/experience', 'experience', experienceSchema, (d) => ({
   title: d.title,

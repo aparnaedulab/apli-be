@@ -9,7 +9,7 @@ import { inviteLinkFor } from '../invites/invite.service.js';
 import { inviteStudents, ownedBatch, setJoinCode } from './campus.service.js';
 import { addStudents } from './students.service.js';
 import { buildStudentTemplate } from './students.template.js';
-import { rowsFromRequest } from './students.intake.js';
+import { intakeOptions, rowsFromRequest } from './students.intake.js';
 import { asWorkbook, workbookUpload } from '../../lib/upload.js';
 import { loadProfile, serialiseProfile } from '../candidates/candidate.service.js';
 import {
@@ -19,6 +19,9 @@ import {
   uniqueBatchName,
 } from './batch.schemas.js';
 import { can } from '../roles/can.js';
+import { activeGenders } from '../students/lists.js';
+import { assertMayAdd, policyForCollege } from '../students/policy.js';
+import { programmeIndex, teachAlias } from '../students/programme.js';
 
 export const campusRouter = Router();
 
@@ -260,7 +263,10 @@ campusRouter.post(
     const collegeId = requireCollegeId(req);
     const rows = await rowsFromRequest(req);
 
-    res.status(201).json(await addStudents(collegeId, rows, req.session.userId!));
+    assertMayAdd(await policyForCollege(collegeId), 'college');
+    const opts = intakeOptions(req);
+    const out = await addStudents(collegeId, rows, req.session.userId!, opts);
+    res.status(opts.dryRun ? 200 : 201).json(out);
   }),
 );
 
@@ -282,6 +288,9 @@ campusRouter.get(
     const buffer = await buildStudentTemplate({
       batchNames: batches.map((b) => b.name),
       collegeName: college?.name,
+      genders: await activeGenders(),
+      programmes: (await programmeIndex(collegeId)).all,
+      policy: await policyForCollege(collegeId),
     });
 
     res.set(asWorkbook('apli-students.xlsx')).send(Buffer.from(buffer));
@@ -302,7 +311,10 @@ campusRouter.post(
     const batch = await ownedBatch(collegeId, req.params.id!);
     const rows = await rowsFromRequest(req);
 
-    res.status(201).json(await addStudents(collegeId, rows, req.session.userId!, { batch }));
+    assertMayAdd(await policyForCollege(collegeId), 'college');
+    const opts = intakeOptions(req);
+    const out = await addStudents(collegeId, rows, req.session.userId!, { batch, ...opts });
+    res.status(opts.dryRun ? 200 : 201).json(out);
   }),
 );
 
@@ -314,10 +326,55 @@ campusRouter.get(
     const collegeId = requireCollegeId(req);
     const batch = await ownedBatch(collegeId, req.params.id!);
 
-    const buffer = await buildStudentTemplate({ fixedBatchName: batch.name });
+    const buffer = await buildStudentTemplate({
+      fixedBatchName: batch.name,
+      genders: await activeGenders(),
+      programmes: (await programmeIndex(collegeId)).all,
+    });
     res.set(asWorkbook(`${batch.name.replace(/[^\w -]/g, '')} students.xlsx`)).send(
       Buffer.from(buffer),
     );
+  }),
+);
+
+/**
+ * GET /api/campus/programmes — what this college runs, for the Programme column.
+ */
+campusRouter.get(
+  '/programmes',
+  can('student:write'),
+  asyncHandler(async (req, res) => {
+    const index = await programmeIndex(requireCollegeId(req));
+    res.json({ programmes: index.all });
+  }),
+);
+
+/**
+ * POST /api/campus/programmes/:id/aliases — teach a spelling.
+ *
+ * Called from the upload preview, where somebody has just been shown that
+ * "BCom Prog" matched nothing and has said which programme it means. Every
+ * later file carrying that spelling resolves without anyone thinking about
+ * it, which is what makes a strict check bearable on a real roster.
+ */
+campusRouter.post(
+  '/programmes/:id/aliases',
+  can('student:write'),
+  asyncHandler(async (req, res) => {
+    const collegeId = requireCollegeId(req);
+    const { spelling } = z
+      .object({ spelling: z.string().trim().min(1, 'Nothing to teach.').max(200) })
+      .parse(req.body);
+
+    // Scoped by the query, not by an `if`: a programme id from another
+    // college simply does not match.
+    const programme = await prisma.collegeProgram.findFirst({
+      where: { id: req.params.id!, collegeId },
+      select: { id: true },
+    });
+    if (!programme) throw notFound('No such programme at this college.');
+
+    res.status(201).json(await teachAlias(collegeId, programme.id, spelling, req.session.userId!));
   }),
 );
 

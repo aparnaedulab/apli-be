@@ -25,7 +25,6 @@ import {
   registrations,
   respond,
   schedule,
-  setCriteria,
   unregister,
   withdrawInvite,
 } from './drive.service.js';
@@ -230,25 +229,14 @@ companyDrivesRouter.get(
   }),
 );
 
-/** The company setting the bar it actually wants. Only while it is undecided. */
-companyDrivesRouter.patch(
-  '/:id/criteria',
-  asyncHandler(async (req, res) => {
-    const body = z
-      .object({
-        minCgpa: z.coerce.number().min(0).max(10).nullable().optional(),
-        minDegreePct: z.coerce.number().min(0).max(100).nullable().optional(),
-        maxBacklogs: z.coerce.number().int().min(0).max(50).nullable().optional(),
-        maxActiveBacklogs: z.coerce.number().int().min(0).max(50).nullable().optional(),
-        courses: z.array(z.string().trim().min(1)).max(50).optional(),
-        branches: z.array(z.string().trim().min(1)).max(100).optional(),
-        gradYears: z.array(z.coerce.number().int().min(2000).max(2100)).max(20).optional(),
-      })
-      .parse(req.body);
-    const drive = await setCriteria(companyOf(req), req.params.id!, body);
-    res.json({ drive, report: await eligibilityReport(drive.id) });
-  }),
-);
+/*
+ * There was a PATCH /:id/criteria here, which set a bar on the drive.
+ *
+ * Gone with the columns behind it. A bar says who may apply and applying
+ * happens against a role, so a second one on the drive was a number shown to
+ * a recruiter as a rule that gated nothing. The company states its
+ * requirement in the role editor, and the report below counts against it.
+ */
 
 /**
  * Who the company will meet.

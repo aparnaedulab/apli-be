@@ -40,6 +40,23 @@ const PUBLIC_ROUTES: ReadonlyArray<RegExp> = [
   /^\/internships\/review\/[^/]+$/, // a mentor's evaluation link - the token is the credential
   /^\/proof\/certificates\/[^/]+$/, // anyone may check a simulation certificate is real
   /^\/public\/tenants\/[^/]+$/, // an institution's branded sign-in page and Contact us
+
+  // A student registering themselves, where their institution allows it.
+  // The college code is what identifies the institution - both of these
+  // answer "no such college taking registrations" to anything else, so
+  // neither discloses which institutions exist.
+  /^\/public\/register\/[^/]+$/,
+  /^\/public\/register$/,
+
+  // Mail, open on purpose so it can be driven from Postman without a session.
+  // This makes anything that can reach the API able to send mail through this
+  // server, as any sender the relay will accept. It is here for testing on a
+  // VM that is not on the public internet - put the role guard back before
+  // this deployment is reachable from outside.
+  /^\/mail\/status$/,
+  /^\/mail\/send$/,
+  /^\/mail\/templates\/[^/]+$/,
+  /^\/mail\/templates\/[^/]+\/preview$/,
 ];
 
 function isPublic(path: string): boolean {

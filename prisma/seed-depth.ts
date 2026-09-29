@@ -25,6 +25,7 @@ import {
   PlacementType,
   PostingStatus,
   Prisma,
+  RecordSource,
   Role,
   RoundOutcome,
 } from '@prisma/client';
@@ -318,6 +319,9 @@ export async function seedDepth(passwordHash: string): Promise<SeededLogin[]> {
         isFrozen: frozen,
         verifiedAt: frozen ? daysAgo(intBetween(60, 300)) : null,
       });
+      // The college's own record of the degree, not the student's account of
+      // it: it is the evidence behind the verified CGPA, so it is read-only
+      // to them for the same reason the CGPA is.
       educations.push({
         id: nid('e'),
         candidateId,
@@ -326,6 +330,7 @@ export async function seedDepth(passwordHash: string): Promise<SeededLogin[]> {
         startYear: opts.graduationYear - 4,
         endYear: opts.graduationYear,
         cgpa,
+        source: RecordSource.COLLEGE,
       });
       for (const s of shuffled(skills).slice(0, intBetween(3, 6))) {
         candidateSkills.push({ candidateId, skillId: s.id });

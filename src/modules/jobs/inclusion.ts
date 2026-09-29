@@ -56,6 +56,18 @@ export const GENDER_VALUES: Record<'WOMEN' | 'MEN', string[]> = {
   MEN: ['Male', 'Man', 'M'],
 };
 
+/**
+ * What the gender dropdown offers when operations has not kept a list.
+ *
+ * The list is theirs to edit - it is RefValue data like cities and NAAC
+ * grades - but an empty one is not a neutral default. A student who cannot
+ * state their gender never matches a role restricted to one, and is never
+ * told that is why, so a blank list quietly costs them roles. These four are
+ * what the matcher above already knows how to read, so the fallback and the
+ * matching cannot disagree. Any row operations adds replaces all of this.
+ */
+export const DEFAULT_GENDERS = ['Female', 'Male', 'Other', 'Prefer not to say'];
+
 export const isRestricted = (g: string | null | undefined): g is 'WOMEN' | 'MEN' => g === 'WOMEN' || g === 'MEN';
 
 /** Keeps only keys that are on the list, in the list's order. */

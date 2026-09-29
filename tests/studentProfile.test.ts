@@ -271,6 +271,100 @@ describe('what a college vouched for', () => {
  * "Node.js" and a role asking for "Node.js" meet only because they are the
  * same row, so a second spelling is a skill that quietly matches nobody.
  */
+describe('the six bars the lock used to miss', () => {
+  /*
+   * Live backlogs, gap years and the degree, diploma and postgraduate marks
+   * were all added to a role's eligibility over the life of the product, and
+   * none of them reached the set a verified student may not change. So a
+   * verified student could set their live backlogs to zero and walk into
+   * every role that asked for none. The lock is derived from the registry
+   * now; these pin the behaviour that derivation buys.
+   */
+  it('refuses a verified student changing their live backlogs', async () => {
+    const { call, candidateId } = await verifiedStudent();
+    await db.candidate.update({ where: { id: candidateId }, data: { activeBacklogs: 2 } });
+
+    const res = await call('PATCH', '/candidate/profile', { activeBacklogs: 0 });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error.message).toMatch(/locked/i);
+    expect((await db.candidate.findUniqueOrThrow({ where: { id: candidateId } })).activeBacklogs).toBe(2);
+  });
+
+  it('refuses a verified student changing their gap years', async () => {
+    const { call, candidateId } = await verifiedStudent();
+    await db.candidate.update({ where: { id: candidateId }, data: { gapYears: 1 } });
+
+    const res = await call('PATCH', '/candidate/profile', { gapYears: 0 });
+    expect(res.status).toBe(409);
+  });
+
+  it('refuses a verified student changing the marks a role reads', async () => {
+    const { call, candidateId } = await verifiedStudent();
+    await db.candidate.update({
+      where: { id: candidateId },
+      data: { degreePct: 71, diplomaPct: 65, pgCgpa: 7.1, pgPct: 68 },
+    });
+
+    for (const change of [{ degreePct: 95 }, { diplomaPct: 95 }, { pgCgpa: 9.5 }, { pgPct: 95 }]) {
+      const res = await call('PATCH', '/candidate/profile', change);
+      expect(res.status, Object.keys(change)[0]).toBe(409);
+    }
+  });
+
+  it('names the field that moved, so they know what to ask about', async () => {
+    const { call, candidateId } = await verifiedStudent();
+    await db.candidate.update({ where: { id: candidateId }, data: { activeBacklogs: 2 } });
+
+    const res = await call('PATCH', '/candidate/profile', { activeBacklogs: 0 });
+    expect(res.body.error.message).toContain('live backlogs');
+  });
+
+  it('still lets a verified student fill in a blank nobody recorded', async () => {
+    const { call, candidateId } = await verifiedStudent();
+    // Never recorded is never verified - refusing this would leave a student
+    // whose college imported no branch unable to state one for three years.
+    const res = await call('PATCH', '/candidate/profile', { specialisation: 'Computer Science' });
+
+    expect(res.status).toBe(200);
+    expect((await db.candidate.findUniqueOrThrow({ where: { id: candidateId } })).specialisation).toBe(
+      'Computer Science',
+    );
+  });
+});
+
+describe('the form holds the same line as the class-list upload', () => {
+  it('refuses a mobile number the upload would have refused', async () => {
+    const { call } = await verifiedStudent();
+
+    // The upload has always wanted ten digits; the form took anything, so a
+    // student could blank or mangle the only number their cell reaches them on.
+    const res = await call('PATCH', '/candidate/profile', { phone: '90000' });
+    expect(res.status).toBe(400);
+  });
+
+  it('bounds a mark the same way on both sides', async () => {
+    const { call } = await verifiedStudent();
+    const res = await call('PATCH', '/candidate/profile', { pgCgpa: 12 });
+    expect(res.status).toBe(400);
+  });
+
+  it('holds gender to the list, and records the list’s spelling', async () => {
+    const { call, candidateId } = await verifiedStudent();
+    await db.refValue.upsert({
+      where: { kind_value: { kind: 'GENDER', value: 'Female' } },
+      update: { isActive: true },
+      create: { kind: 'GENDER', value: 'Female' },
+    });
+
+    expect((await call('PATCH', '/candidate/profile', { gender: 'F' })).status).toBe(400);
+
+    const ok = await call('PATCH', '/candidate/profile', { gender: 'female' });
+    expect(ok.status).toBe(200);
+    expect((await db.candidate.findUniqueOrThrow({ where: { id: candidateId } })).gender).toBe('Female');
+  });
+});
+
 describe('a student picking their skills', () => {
   it('reuses a skill the portal already knows, whatever they typed', async () => {
     const { call, candidateId } = await verifiedStudent();

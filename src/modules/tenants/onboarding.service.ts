@@ -34,6 +34,9 @@ export const STEP_KEYS = [
   'colleges',
   'mapping',
   'batches',
+  // What the institution records about a student, and who may add one.
+  // Before the roster step anywhere, because everything downstream reads it.
+  'students',
   'features',
   'people',
   'review',
@@ -1062,6 +1065,18 @@ export function checklistFor(state: State, hasModuleRows: boolean): ChecklistIte
         state.batches.length > 0
           ? `${state.batches.length} batch${state.batches.length === 1 ? '' : 'es'}`
           : 'Optional - placement cells can create their own.',
+    },
+    {
+      step: 'students',
+      label: 'Student details',
+      // Not required to launch: the default is exactly what the platform
+      // did before there was a choice, so an institution that never opens
+      // the screen is not blocked by it existing.
+      done: t.completedSteps.includes('students'),
+      required: false,
+      detail: t.completedSteps.includes('students')
+        ? 'What to collect, and who adds students'
+        : 'Optional - name, email and mobile required, and both the university and its colleges may add.',
     },
     {
       step: 'features',

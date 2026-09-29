@@ -114,6 +114,58 @@ const schema = z.object({
   MAIL_REPLY_TO: optional(z.string().trim().email()),
 
   /**
+   * The logo at the top of a message, and the name beneath it.
+   *
+   * The logo must be a public absolute URL: a mail client cannot read a path
+   * on this server, and most block remote images until the reader allows them
+   * - so the name is used as the image's alt text, and stands in for the logo
+   * entirely when no URL is set.
+   */
+  MAIL_LOGO_URL: optional(z.string().trim().url('MAIL_LOGO_URL must be a full public URL.')),
+  MAIL_ORG_NAME: z.preprocess(
+    (v) => (v === '' || v === undefined ? 'Apli.ai' : v),
+    z.string().trim().min(1),
+  ),
+
+  /**
+   * The notification service, as an alternative to SMTP.
+   *
+   * Given a URL and a token, mail goes out over HTTP through this service
+   * instead of a mail server: nothing is relayed from here, so there is no
+   * SMTP account to hold and no outbound port 25/587 to open. Both are needed
+   * together - a URL without a token is treated as not configured, because
+   * half a setting is more confusing than none.
+   *
+   * SMTP still works and still wins when both are set, so an existing
+   * deployment is not changed by adding these.
+   */
+  EMAIL_SNS_URL: optional(z.string().trim().url('EMAIL_SNS_URL must be a full URL.')),
+  EMAIL_SNS_TOKEN: optional(z.string().trim().min(1)),
+
+  /**
+   * Which field of the send request carries the HTML body.
+   *
+   * Services disagree, and one that ignores a field it does not recognise
+   * fails silently: the send succeeds and the message arrives as unformatted
+   * text. If a message arrives with its paragraphs run together, the service
+   * rendered the plain-text field as HTML - which is the same as saying the
+   * HTML belongs in that field instead. Setting this to `text` puts it there
+   * and sends no separate plain-text part.
+   */
+  EMAIL_SNS_HTML_FIELD: z.preprocess(
+    (v) => (v === '' || v === undefined ? 'html' : v),
+    z.enum(['html', 'text', 'body', 'content', 'message']),
+  ),
+
+  /**
+   * Where a file is uploaded before it can be attached. The send call carries
+   * a reference the service returns, not the bytes, so a large attachment does
+   * not have to fit in the send request.
+   */
+  EMAIL_ATTACHMENT_URL: optional(z.string().trim().url('EMAIL_ATTACHMENT_URL must be a full URL.')),
+  EMAIL_ATTACHMENT_TOKEN: optional(z.string().trim().min(1)),
+
+  /**
    * Where uploaded images (institution logos and favicons) are kept. Relative
    * paths are read from the server folder. Back this directory up with the
    * database - the rows point at files in it.

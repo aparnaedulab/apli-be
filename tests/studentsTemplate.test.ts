@@ -48,6 +48,37 @@ describe('the class-list template', () => {
     expect(wb.getWorksheet('Batches')).toBeDefined();
   });
 
+  it('offers the gender list the student’s own form has always offered', async () => {
+    const wb = await load(await buildStudentTemplate({ genders: ['Female', 'Male'] }));
+
+    const sheet = wb.getWorksheet('Students')!;
+    const col = (sheet.getRow(1).values as string[]).indexOf('Gender');
+    expect(sheet.getCell(2, col).dataValidation?.formulae?.[0]).toBe('"Female,Male"');
+  });
+
+  it('keeps the college dropdown however many colleges there are', async () => {
+    // An inline list is capped at 255 characters, so a university with thirty
+    // colleges used to get no dropdown at all - and nothing said so. A range
+    // on the Colleges sheet has no such limit.
+    const codes = Array.from({ length: 40 }, (_, i) => `COLLEGE-CODE-${i}`);
+    const wb = await load(await buildStudentTemplate({ collegeCodes: codes }));
+
+    const sheet = wb.getWorksheet('Students')!;
+    const col = (sheet.getRow(1).values as string[]).indexOf('College code');
+    expect(sheet.getCell(2, col).dataValidation?.formulae?.[0]).toBe('Colleges!$A$2:$A$41');
+    expect(wb.getWorksheet('Colleges')).toBeDefined();
+  });
+
+  it('carries the Lateral entry column the sheet never had', async () => {
+    const wb = await load(await buildStudentTemplate());
+    const headers = wb.getWorksheet('Students')!.getRow(1).values as string[];
+
+    // Diploma % existed for lateral entrants long before the fact itself
+    // could be imported, so a college could record the consequence only.
+    expect(headers).toContain('Diploma %');
+    expect(headers).toContain('Lateral entry');
+  });
+
   it('drops the Batch column when the batch is already chosen', async () => {
     const wb = await load(await buildStudentTemplate({ fixedBatchName: 'CSE 2026' }));
 
@@ -63,25 +94,26 @@ describe('the class-list template', () => {
 
     const wb = await load(await buildStudentTemplate({ batchNames: ['CSE 2026'] }));
     const sheet = wb.getWorksheet('Students')!;
-    sheet.addRow([
-      'Aditi Rane',
-      'aditi@test.local',
-      '9000000023',
-      'CSE 2026',
-      'B.Tech',
-      'Computer Science',
-      '2026',
-      'CS22-101',
-      '',
-      'A',
-      '',
-      '',
-      '8.6',
-      '',
-      '91',
-      '88',
-      '0',
-    ]);
+
+    // Filled in by column name rather than by position, so the row does not
+    // have to be renumbered every time a column moves - which is what broke
+    // when Course and Branch became the single Programme column.
+    const headers = (sheet.getRow(1).values as string[]).filter(Boolean);
+    const cell: Record<string, string> = {
+      Name: 'Aditi Rane',
+      Email: 'aditi@test.local',
+      Mobile: '9000000023',
+      Batch: 'CSE 2026',
+      Programme: 'B.Tech — Computer Science',
+      'Graduating year': '2026',
+      'Roll No': 'CS22-101',
+      Div: 'A',
+      CGPA: '8.6',
+      '10th %': '91',
+      '12th %': '88',
+      'Backlogs (total)': '0',
+    };
+    sheet.addRow(headers.map((h) => cell[h] ?? ''));
 
     const rows = await parseStudentWorkbook(Buffer.from(await wb.xlsx.writeBuffer()));
     expect(rows).toHaveLength(1);
@@ -90,6 +122,8 @@ describe('the class-list template', () => {
     expect(result.skipped).toEqual([]);
 
     const student = await db.candidate.findFirstOrThrow({ where: { collegeId: college.id } });
+    // The college has recorded no programmes, so there is nothing to check
+    // against and the single column is split back into the pair as typed.
     expect(student).toMatchObject({ course: 'B.Tech', specialisation: 'Computer Science' });
     expect(Number(student.cgpa)).toBe(8.6);
   });

@@ -71,13 +71,31 @@ const DRIVE_INCLUDE = {
   company: { select: { id: true, name: true, status: true } },
   college: { select: { id: true, name: true } },
   placement: { select: { id: true, name: true, year: true, isOpen: true } },
-  courses: { select: { course: true } },
-  branches: { select: { specialisation: true } },
-  gradYears: { select: { year: true } },
+  /*
+   * The roles, with the bar each one states.
+   *
+   * The drive used to carry a bar of its own for the report while the Job
+   * carried the one that gated applications. There is one now, and it is the
+   * Job's, so a screen that wants to show "CGPA 7.0+" reads it from here.
+   */
   jobs: {
     select: {
       confirmedAt: true,
-      job: { select: { id: true, title: true, status: true } },
+      job: {
+        select: {
+          id: true,
+          title: true,
+          status: true,
+          openToAll: true,
+          minCgpa: true,
+          minDegreePct: true,
+          maxBacklogs: true,
+          maxActiveBacklogs: true,
+          courses: { select: { course: true } },
+          specialisations: { select: { specialisation: true } },
+          gradYears: { select: { year: true } },
+        },
+      },
     },
   },
   _count: { select: { registrations: true } },
@@ -273,53 +291,15 @@ export async function respond(
  * around them; moving them quietly at that point is not a change, it is a
  * different drive.
  */
-export async function setCriteria(
-  companyId: string,
-  id: string,
-  bar: {
-    minCgpa?: number | null;
-    minDegreePct?: number | null;
-    maxBacklogs?: number | null;
-    maxActiveBacklogs?: number | null;
-    courses?: string[];
-    branches?: string[];
-    gradYears?: number[];
-  },
-) {
-  const drive = await prisma.campusDrive.findFirst({
-    where: { id, companyId },
-    select: { id: true, status: true },
-  });
-  if (!drive) throw notFound('No such invitation.');
-  if (drive.status !== S.INVITED) {
-    throw conflict('The bar can only be changed while the invitation is still open.');
-  }
-
-  return prisma.campusDrive.update({
-    where: { id: drive.id },
-    data: {
-      minCgpa: bar.minCgpa ?? null,
-      minDegreePct: bar.minDegreePct ?? null,
-      maxBacklogs: bar.maxBacklogs ?? null,
-      maxActiveBacklogs: bar.maxActiveBacklogs ?? null,
-      ...(bar.courses
-        ? { courses: { deleteMany: {}, create: bar.courses.map((course) => ({ course })) } }
-        : {}),
-      ...(bar.branches
-        ? {
-            branches: {
-              deleteMany: {},
-              create: bar.branches.map((specialisation) => ({ specialisation })),
-            },
-          }
-        : {}),
-      ...(bar.gradYears
-        ? { gradYears: { deleteMany: {}, create: bar.gradYears.map((year) => ({ year })) } }
-        : {}),
-    },
-    include: DRIVE_INCLUDE,
-  });
-}
+/*
+ * There was a `setCriteria` here, which wrote a bar onto the drive.
+ *
+ * It is gone with the columns it wrote to. A bar states who may apply, and
+ * applying happens against a Job - so a second bar on the drive was a number
+ * that looked like a rule, was shown to a recruiter as one, and gated
+ * nothing. The company states its requirement on the role, where it is read
+ * by jobs/visibility.ts and by the report below alike.
+ */
 
 export async function schedule(
   collegeId: string,
@@ -394,29 +374,139 @@ export async function invitableCompanies(q?: string) {
  * The number is therefore lower than the roster, on purpose, and the report
  * says so.
  */
+/**
+ * A bar, as one role states it. Null fields are criteria that role does not set.
+ */
+interface Bar {
+  jobId: string;
+  title: string;
+  minCgpa: number | null;
+  minDegreePct: number | null;
+  maxBacklogs: number | null;
+  maxActiveBacklogs: number | null;
+  courses: Set<string>;
+  branches: Set<string>;
+  years: Set<number>;
+}
+
+/** What a student is measured against, per role, straight off the Job. */
+function barsOf(
+  jobs: { job: Prisma.JobGetPayload<{ include: { courses: true; specialisations: true; gradYears: true } }> }[],
+): Bar[] {
+  const num = (v: Prisma.Decimal | null) => (v === null ? null : Number(v));
+  return jobs.map(({ job }) => ({
+    jobId: job.id,
+    title: job.title,
+    /*
+     * `openToAll` clears every bar, exactly as the job editor promises when
+     * it is ticked. Reading the columns without honouring it would show a
+     * recruiter a bar on a role that has said out loud it has none.
+     */
+    minCgpa: job.openToAll ? null : num(job.minCgpa),
+    minDegreePct: job.openToAll ? null : num(job.minDegreePct),
+    maxBacklogs: job.openToAll ? null : job.maxBacklogs,
+    maxActiveBacklogs: job.openToAll ? null : job.maxActiveBacklogs,
+    courses: new Set(job.courses.map((c) => c.course)),
+    branches: new Set(job.specialisations.map((b) => b.specialisation)),
+    years: new Set(job.gradYears.map((g) => g.year)),
+  }));
+}
+
+type Student = {
+  course: string | null;
+  specialisation: string | null;
+  graduationYear: number | null;
+  cgpa: Prisma.Decimal | null;
+  degreePct: Prisma.Decimal | null;
+  backlogs: number | null;
+  activeBacklogs: number | null;
+};
+
+/**
+ * Which of a role's criteria this student misses. Empty means they clear it.
+ *
+ * A missing number fails the criterion that needs it - the same rule as
+ * jobs/visibility.ts, and for the same reason: "no CGPA on record" is not
+ * "clears 7.0". Either-or bars are read the way the job editor writes them,
+ * so a student with a percentage and no CGPA clears a role that accepts
+ * either.
+ */
+function missedBy(c: Student, bar: Bar): string[] {
+  const num = (v: Prisma.Decimal | null) => (v === null ? null : Number(v));
+  const out: string[] = [];
+
+  if (bar.courses.size > 0 && !(c.course && bar.courses.has(c.course))) out.push('course');
+  if (bar.branches.size > 0 && !(c.specialisation && bar.branches.has(c.specialisation))) {
+    out.push('branch');
+  }
+  if (bar.years.size > 0 && !(c.graduationYear && bar.years.has(c.graduationYear))) {
+    out.push('graduating year');
+  }
+
+  // One requirement written two ways: clearing either clears it.
+  const cgpa = num(c.cgpa);
+  const pct = num(c.degreePct);
+  const wantsAggregate = bar.minCgpa !== null || bar.minDegreePct !== null;
+  if (wantsAggregate) {
+    const byCgpa = bar.minCgpa !== null && cgpa !== null && cgpa >= bar.minCgpa;
+    const byPct = bar.minDegreePct !== null && pct !== null && pct >= bar.minDegreePct;
+    if (!byCgpa && !byPct) out.push(bar.minCgpa !== null ? 'CGPA' : 'degree percentage');
+  }
+
+  if (bar.maxBacklogs !== null && (c.backlogs ?? 0) > bar.maxBacklogs) out.push('backlogs');
+  if (bar.maxActiveBacklogs !== null && (c.activeBacklogs ?? 0) > bar.maxActiveBacklogs) {
+    out.push('live backlogs');
+  }
+  return out;
+}
+
+/**
+ * The numbers a company is shown before it agrees to come.
+ *
+ * Counts, and nothing else. No names, no roll numbers, no list: a recruiter
+ * deciding whether a campus is worth a day needs to know how many people
+ * clear the bar, not who they are.
+ *
+ * Only frozen students are counted. An unverified record is a claim the
+ * college has not checked, and promising a company forty students on the
+ * strength of self-entered marks is how a visit turns into a wasted morning.
+ * The number is therefore lower than the roster, on purpose, and the report
+ * says so.
+ *
+ * Counted against the drive's roles, because those are the criteria that will
+ * actually be applied. A student needs to clear one role, not all of them -
+ * they came for a job, not for every job - so the headline is the union and
+ * `roles` breaks it down for a company weighing which of its openings is
+ * worth bringing. A drive with no roles yet has no bar to count against, and
+ * says so rather than reporting the whole roster as eligible.
+ */
 export async function eligibilityReport(driveId: string) {
   const drive = await prisma.campusDrive.findUnique({
     where: { id: driveId },
     include: {
-      courses: { select: { course: true } },
-      branches: { select: { specialisation: true } },
-      gradYears: { select: { year: true } },
+      jobs: {
+        select: {
+          job: { include: { courses: true, specialisations: true, gradYears: true } },
+        },
+      },
       placement: { select: { batches: { select: { id: true } } } },
     },
   });
   if (!drive) throw notFound('No such drive.');
 
+  const empty = {
+    inSeason: 0,
+    verified: 0,
+    eligible: 0,
+    eligiblePct: null as number | null,
+    byBranch: [] as { branch: string; count: number }[],
+    failing: [] as { reason: string; count: number }[],
+    roles: [] as { jobId: string; title: string; eligible: number }[],
+  };
+
   const batchIds = drive.placement.batches.map((b) => b.id);
   if (batchIds.length === 0) {
-    return {
-      inSeason: 0,
-      verified: 0,
-      eligible: 0,
-      eligiblePct: null,
-      byBranch: [],
-      failing: [],
-      note: 'No batches are in this season yet, so there is nobody to count.',
-    };
+    return { ...empty, note: 'No batches are in this season yet, so there is nobody to count.' };
   }
 
   const memberships = await prisma.batchMembership.findMany({
@@ -436,68 +526,42 @@ export async function eligibilityReport(driveId: string) {
       },
     },
   });
-
-  const num = (v: Prisma.Decimal | null) => (v === null ? null : Number(v));
-  const minCgpa = num(drive.minCgpa);
-  const minDegreePct = num(drive.minDegreePct);
-  const courses = new Set(drive.courses.map((c) => c.course));
-  const branches = new Set(drive.branches.map((b) => b.specialisation));
-  const years = new Set(drive.gradYears.map((g) => g.year));
-
   const verified = memberships.filter((m) => m.isFrozen);
+
+  const bars = barsOf(drive.jobs);
+  if (bars.length === 0) {
+    return {
+      ...empty,
+      inSeason: memberships.length,
+      verified: verified.length,
+      note: 'No roles are on this drive yet, so there is no bar to count against. Add one and these numbers narrow to it.',
+    };
+  }
 
   /** Why somebody did not make it, counted - so a bar can be argued about. */
   const failing = new Map<string, number>();
-  const bump = (k: string) => failing.set(k, (failing.get(k) ?? 0) + 1);
-
   const byBranch = new Map<string, number>();
+  const perRole = new Map(bars.map((b) => [b.jobId, 0]));
   let eligible = 0;
 
   for (const m of verified) {
     const c = m.candidate;
-    let ok = true;
+    let best: string[] | null = null;
 
-    // A missing number fails the criterion that needs it - the same rule as
-    // jobs/visibility.ts. "No CGPA on record" is not "clears 7.0".
-    if (courses.size > 0 && !(c.course && courses.has(c.course))) {
-      ok = false;
-      bump('course');
-    }
-    if (branches.size > 0 && !(c.specialisation && branches.has(c.specialisation))) {
-      ok = false;
-      bump('branch');
-    }
-    if (years.size > 0 && !(c.graduationYear && years.has(c.graduationYear))) {
-      ok = false;
-      bump('graduating year');
-    }
-    if (minCgpa !== null && !(num(c.cgpa) !== null && num(c.cgpa)! >= minCgpa)) {
-      ok = false;
-      bump('CGPA');
-    }
-    if (
-      minDegreePct !== null &&
-      !(num(c.degreePct) !== null && num(c.degreePct)! >= minDegreePct)
-    ) {
-      ok = false;
-      bump('degree percentage');
-    }
-    if (drive.maxBacklogs !== null && (c.backlogs ?? 0) > drive.maxBacklogs) {
-      ok = false;
-      bump('backlogs');
-    }
-    if (
-      drive.maxActiveBacklogs !== null &&
-      (c.activeBacklogs ?? 0) > drive.maxActiveBacklogs
-    ) {
-      ok = false;
-      bump('live backlogs');
+    for (const bar of bars) {
+      const missed = missedBy(c, bar);
+      if (missed.length === 0) perRole.set(bar.jobId, perRole.get(bar.jobId)! + 1);
+      // The role they came closest on, so what is named below is the thing
+      // worth changing rather than an arbitrary one of several refusals.
+      if (best === null || missed.length < best.length) best = missed;
     }
 
-    if (ok) {
+    if (best !== null && best.length === 0) {
       eligible++;
       const key = c.specialisation || c.course || 'Not stated';
       byBranch.set(key, (byBranch.get(key) ?? 0) + 1);
+    } else {
+      for (const reason of best ?? []) failing.set(reason, (failing.get(reason) ?? 0) + 1);
     }
   }
 
@@ -512,7 +576,11 @@ export async function eligibilityReport(driveId: string) {
     failing: [...failing.entries()]
       .map(([reason, count]) => ({ reason, count }))
       .sort((a, b) => b.count - a.count),
-    note: 'Verified students only. Unverified records are claims the college has not checked yet.',
+    roles: bars.map((b) => ({ jobId: b.jobId, title: b.title, eligible: perRole.get(b.jobId)! })),
+    note:
+      bars.length === 1
+        ? 'Verified students only, against this drive\u2019s role. Unverified records are claims the college has not checked yet.'
+        : 'Verified students only, counting anyone who clears at least one of this drive\u2019s roles. Unverified records are claims the college has not checked yet.',
   };
 }
 

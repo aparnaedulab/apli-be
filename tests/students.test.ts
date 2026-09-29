@@ -244,6 +244,108 @@ describe('adding students', () => {
   });
 });
 
+describe('the upload holds the same line as the student’s own form', () => {
+  it('refuses a mark outside its range instead of quietly dropping it', async () => {
+    const college = await makeCollege();
+    const sender = await officer();
+
+    // This used to store null, which downstream reads as "no CGPA recorded" -
+    // so the student silently failed every CGPA bar and nobody was told.
+    const result = await addStudents(college.id, [row({ cgpa: '12' })], sender.id);
+
+    expect(result.created).toEqual([]);
+    expect(result.skipped[0]!.reason).toContain('between 0 and 10');
+  });
+
+  it('bounds the numbers the profile form has always bounded', async () => {
+    const college = await makeCollege();
+    const sender = await officer();
+
+    const result = await addStudents(
+      college.id,
+      [
+        row({ fullName: 'Bad year', graduationYear: '1980' }),
+        row({ fullName: 'Too many backlogs', backlogs: '400' }),
+        row({ fullName: 'Too many gaps', gapYears: '99' }),
+      ],
+      sender.id,
+    );
+
+    expect(result.created).toEqual([]);
+    expect(result.skipped).toHaveLength(3);
+  });
+
+  it('says everything wrong with a row, not just the first thing', async () => {
+    const college = await makeCollege();
+    const sender = await officer();
+
+    const result = await addStudents(
+      college.id,
+      [row({ cgpa: '12', gapYears: '99' })],
+      sender.id,
+    );
+
+    expect(result.skipped[0]!.reason).toContain('CGPA');
+    expect(result.skipped[0]!.reason).toContain('Gap years');
+  });
+
+  it('takes lateral entry off the sheet, where the diploma column already was', async () => {
+    const college = await makeCollege();
+    const sender = await officer();
+
+    const result = await addStudents(
+      college.id,
+      [row({ isLateralEntry: 'Yes', diplomaPct: '78' })],
+      sender.id,
+    );
+
+    expect(result.created).toHaveLength(1);
+    const candidate = await db.candidate.findFirstOrThrow({
+      where: { user: { email: result.created[0]!.email } },
+    });
+    expect(candidate.isLateralEntry).toBe(true);
+    expect(Number(candidate.diplomaPct)).toBe(78);
+  });
+
+  it('holds a gender to the list, and records the list’s own spelling', async () => {
+    const college = await makeCollege();
+    const sender = await officer();
+    await db.refValue.upsert({
+      where: { kind_value: { kind: 'GENDER', value: 'Female' } },
+      update: { isActive: true },
+      create: { kind: 'GENDER', value: 'Female' },
+    });
+
+    const result = await addStudents(
+      college.id,
+      // A roster of "M" and "FEMALE" is what made one-gender roles invisible:
+      // visibility.ts groups on the spelling that was recorded.
+      [row({ fullName: 'Listed', gender: 'female' }), row({ fullName: 'Not listed', gender: 'F' })],
+      sender.id,
+    );
+
+    expect(result.created).toHaveLength(1);
+    expect(result.skipped[0]!.reason).toContain('not one of the genders');
+
+    const candidate = await db.candidate.findFirstOrThrow({
+      where: { user: { email: result.created[0]!.email } },
+    });
+    expect(candidate.gender).toBe('Female');
+  });
+
+  it('takes free text for gender while the institution has no list', async () => {
+    const college = await makeCollege();
+    const sender = await officer();
+    await db.refValue.updateMany({ where: { kind: 'GENDER' }, data: { isActive: false } });
+
+    // The same fallback the programme check uses. Refusing every roster
+    // because nobody has set a vocabulary up yet blocks work that has
+    // nothing to do with the vocabulary.
+    const result = await addStudents(college.id, [row({ gender: 'Female' })], sender.id);
+    expect(result.created).toHaveLength(1);
+  });
+});
+
 describe('reading a pasted list', () => {
   it('reads a header row, whatever the spreadsheet called the columns', () => {
     const rows = parseStudentRows(

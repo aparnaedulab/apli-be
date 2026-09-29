@@ -159,6 +159,24 @@ describe('onboarding an institution', () => {
     expect(again.body.result.batchesCreated).toBe(0);
     expect(again.body.result.invites).toHaveLength(0);
 
+    /*
+     * What the institution records about a student, and who may add one.
+     * Optional to launch - the default is what the platform did before
+     * there was a choice - but set here so the walk covers it.
+     */
+    const intake = await call('PUT', `/platform/tenants/${id}/student-intake`, {
+      fields: { prn: 'required', dateOfBirth: 'off' },
+      collegeMayAdd: false,
+      selfRegister: true,
+      selfFields: ['phone', 'programme'],
+    });
+    expect(intake.status).toBe(200);
+    expect(intake.body.policy.fields.prn).toBe('required');
+    expect(intake.body.policy.fields.dateOfBirth).toBe('off');
+    // The account itself is never switchable, whatever was sent.
+    expect(intake.body.policy.fields.fullName).toBe('required');
+    expect(intake.body.tenant.completedSteps).toContain('students');
+
     const features = await call('PUT', `/platform/tenants/${id}/features`, { selected: ['dev.aptitude'] });
     expect(features.status).toBe(200);
     expect(features.body.result.added).toEqual(['dev.readiness']);
@@ -182,7 +200,7 @@ describe('onboarding an institution', () => {
     const launched = await call('POST', `/platform/tenants/${id}/launch`);
     expect(launched.status).toBe(200);
     expect(launched.body.tenant.status).toBe('ACTIVE');
-    expect(launched.body.tenant.completedSteps).toHaveLength(8);
+    expect(launched.body.tenant.completedSteps).toHaveLength(9);
 
     const batches = await db.batch.findMany({ where: { tenantId: id } });
     expect(batches.map((b) => b.name).sort()).toEqual([`${course.name} 2027`, `${course.name} 2028`]);

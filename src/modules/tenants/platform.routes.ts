@@ -42,6 +42,8 @@ import {
   inviteTenantAdmin,
   launchTenant,
   listTenants,
+  loadTenant,
+  markStepById,
   onboardingState,
   revokeTenantInvite,
   saveAcademics,
@@ -51,6 +53,12 @@ import {
   slugAvailability,
   updateIdentity,
 } from './onboarding.service.js';
+import {
+  describeIntake,
+  intakePolicySchema,
+  policyFor,
+  savePolicy,
+} from '../students/policy.js';
 
 /**
  * The platform console: where institutions are onboarded and looked after.
@@ -381,6 +389,35 @@ platformRouter.put(
     const { selected, unverifiedCompanyAccess } = featuresSchema.parse(req.body);
     const result = await saveFeatures(req.params.id!, selected, { unverifiedCompanyAccess });
     res.json({ ...(await onboardingState(req.params.id!)), result });
+  }),
+);
+
+/**
+ * GET /api/platform/tenants/:id/student-intake
+ *
+ * What this institution will record about a student, who may add one, and
+ * what a student is asked if they register themselves. Set here so it is
+ * decided before any college starts typing, and editable afterwards by the
+ * institution's own admins on the same screen.
+ */
+platformRouter.get(
+  '/tenants/:id/student-intake',
+  can('college:read'),
+  asyncHandler(async (req, res) => {
+    await loadTenant(req.params.id!);
+    res.json(describeIntake(await policyFor(req.params.id!)));
+  }),
+);
+
+/** PUT /api/platform/tenants/:id/student-intake */
+platformRouter.put(
+  '/tenants/:id/student-intake',
+  can('college:write'),
+  asyncHandler(async (req, res) => {
+    await loadTenant(req.params.id!);
+    const saved = await savePolicy(req.params.id!, intakePolicySchema.parse(req.body));
+    await markStepById(req.params.id!, 'students');
+    res.json({ ...describeIntake(saved), ...(await onboardingState(req.params.id!)) });
   }),
 );
 

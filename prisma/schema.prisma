@@ -166,6 +166,7 @@ model User {
   adminMember     AdminMember?
   jobTeams        JobTeamMember[] @relation("JobTeam")
   authoredNotices Notice[]        @relation("NoticeAuthor")
+  programAliases  ProgramAlias[]
 
   @@index([role])
 }
@@ -293,6 +294,7 @@ model Tenant {
   updatedAt DateTime @updatedAt
 
   colleges      College[]
+  intakePolicy  StudentIntakePolicy?
   batches       Batch[]
   companyAccess TenantCompany[]
   adminMembers  AdminMember[]
@@ -361,11 +363,89 @@ model CollegeProgram {
   course         Course          @relation(fields: [courseId], references: [id], onDelete: Restrict)
   specialisation Specialisation? @relation(fields: [specialisationId], references: [id], onDelete: Restrict)
   candidates     Candidate[]
+  aliases        ProgramAlias[]
 
   @@unique([collegeId, courseId, specialisationId])
   @@index([collegeId])
   @@index([courseId])
   @@index([specialisationId])
+}
+
+/// A spelling one college uses for a programme it runs.
+///
+/// Rosters are typed by departments, over years, by people who each have
+/// their own shorthand: "BCom Prog", "B.Com (CS)" and "BCPM" turn up in three
+/// files for one programme. Refusing all three is correct and useless - the
+/// placement cell would be re-typing a spreadsheet they did not write.
+///
+/// So a spelling is taught once, from the upload preview, and every later
+/// file carrying it resolves without anyone thinking about it. The alias is
+/// stored normalised - lower case, letters and digits only - because that is
+/// how it is matched, and it is unique per college rather than per programme:
+/// one word may not mean two different degrees at the same place.
+model ProgramAlias {
+  id               String @id @default(cuid())
+  collegeId        String
+  collegeProgramId String
+
+  /// Normalised on the way in. Never shown; the programme's own name is.
+  alias String
+
+  createdAt   DateTime @default(now())
+  /// Who taught it, so a wrong one can be traced.
+  createdById String?
+
+  college        College        @relation(fields: [collegeId], references: [id], onDelete: Cascade)
+  collegeProgram CollegeProgram @relation(fields: [collegeProgramId], references: [id], onDelete: Cascade)
+  createdBy      User?          @relation(fields: [createdById], references: [id], onDelete: SetNull)
+
+  @@unique([collegeId, alias])
+  @@index([collegeProgramId])
+}
+
+/// What one institution collects about a student, and who may put them on
+/// the roster.
+///
+/// Every field a student record can hold is declared once in
+/// `modules/students/fields.ts`. This says which of them *this* institution
+/// actually wants, which it insists on, and who is allowed to supply them -
+/// because those three answers differ by university and were previously
+/// hard-coded for everybody: exactly three required fields, and both the
+/// university and every college free to add students at any time.
+///
+/// One per institution, not per college. A university with a roster that
+/// means different things at each of its colleges cannot report across them,
+/// which is most of what a university portal is for.
+model StudentIntakePolicy {
+  id       String @id @default(cuid())
+  tenantId String @unique
+
+  /// `{ "<field key>": "off" | "optional" | "required" }`, keyed by the
+  /// student field registry. A key the registry does not know is ignored, so
+  /// retiring a field cannot break a saved policy.
+  fields Json
+
+  /// Who may put a student on the roster. Both by default, which is what
+  /// the platform did before there was a choice.
+  universityMayAdd Boolean @default(true)
+  collegeMayAdd    Boolean @default(true)
+
+  /// Whether a student may register themselves from the public site.
+  selfRegister Boolean @default(false)
+
+  /// The field keys the registration form asks for - a subset of the ones
+  /// collected. Kept apart because what an institution wants on its roster
+  /// and what it will ask a stranger to type are not the same list.
+  selfFields Json
+
+  /// Whether a self-registered student waits for the placement cell to
+  /// confirm they are real before they count as one of its students.
+  selfNeedsApproval Boolean @default(true)
+
+  updatedAt DateTime @updatedAt
+  createdAt DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 }
 
 // ---------------------------------------------------------------------------
@@ -405,18 +485,19 @@ model College {
   createdAt  DateTime @default(now())
   updatedAt  DateTime @updatedAt
 
-  tenant       Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
-  collegeType  CollegeType?         @relation(fields: [collegeTypeId], references: [id])
-  members      CampusMember[]
-  batches      Batch[]
-  placements   Placement[]
-  candidates   Candidate[]
-  invites      Invite[]
-  assessments  Assessment[]
-  posts        Post[]
-  counselling  CounsellingRequest[]
-  campusDrives CampusDrive[]
-  programs     CollegeProgram[]
+  tenant         Tenant               @relation(fields: [tenantId], references: [id], onDelete: Restrict)
+  collegeType    CollegeType?         @relation(fields: [collegeTypeId], references: [id])
+  members        CampusMember[]
+  batches        Batch[]
+  placements     Placement[]
+  candidates     Candidate[]
+  invites        Invite[]
+  assessments    Assessment[]
+  posts          Post[]
+  counselling    CounsellingRequest[]
+  campusDrives   CampusDrive[]
+  programs       CollegeProgram[]
+  programAliases ProgramAlias[]
 
   @@index([tenantId])
   @@index([city])
@@ -949,6 +1030,18 @@ model Candidate {
   @@index([collegeProgramId])
 }
 
+/// Who put a row on a student's profile.
+///
+/// Almost everything a student lists is their own account of themselves and
+/// theirs to change. A qualification the college entered from its records is
+/// not: it is the same fact as the verified marks, arriving through the same
+/// door, and a student who could delete it could delete the evidence for the
+/// number above it and then write their own.
+enum RecordSource {
+  STUDENT
+  COLLEGE
+}
+
 model Education {
   id          String   @id @default(cuid())
   candidateId String
@@ -959,6 +1052,10 @@ model Education {
   endYear     Int?
   cgpa        Decimal? @db.Decimal(4, 2)
   percentage  Decimal? @db.Decimal(5, 2)
+
+  /// STUDENT unless the college entered it. A COLLEGE row is read-only to
+  /// the student - the placement cell corrects it, the same as a mark.
+  source RecordSource @default(STUDENT)
 
   candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
@@ -1797,12 +1894,14 @@ enum CampusDriveStatus {
 /// and walking through Rounds, so the pipeline, the state machine and the
 /// one-offer cascade are untouched by any of this.
 ///
-/// The criteria held here are for the eligibility report only - the numbers a
-/// company is shown before it agrees to come. They are not what gates an
-/// application: that is still the Job's own criteria, checked in
-/// jobs/visibility.ts. Two sets of numbers that must agree would drift; these
-/// answer "is this campus worth a day", the Job's answer "may this student
-/// apply".
+/// A drive holds no criteria of its own, and used to.
+///
+/// It carried a bar for the eligibility report while the Job carried the bar
+/// that gated applications - two sets of numbers about one question, and the
+/// comment that stood here said in as many words that they would drift. They
+/// did not have to: the report and the gate are the same arithmetic, so the
+/// report reads the drive's roles instead. A recruiter is shown the rule that
+/// will actually be applied, and there is nothing left to disagree with.
 model CampusDrive {
   id          String            @id @default(cuid())
   collegeId   String
@@ -1819,15 +1918,6 @@ model CampusDrive {
   addressLine String?   @db.Text
   meetingLink String?   @db.Text
 
-  /// The company's bar, for the report it is shown before agreeing.
-  ///
-  /// Null on a new drive and set by the company on its invitation. Never by
-  /// the college: a college does not tell a recruiter who it may consider.
-  minCgpa           Decimal? @db.Decimal(4, 2)
-  minDegreePct      Decimal? @db.Decimal(5, 2)
-  maxBacklogs       Int?
-  maxActiveBacklogs Int?
-
   invitedAt     DateTime?
   respondedAt   DateTime?
   openedAt      DateTime?
@@ -1840,42 +1930,12 @@ model CampusDrive {
   college       College                   @relation(fields: [collegeId], references: [id], onDelete: Cascade)
   placement     Placement                 @relation(fields: [placementId], references: [id], onDelete: Cascade)
   company       Company                   @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  courses       CampusDriveCourse[]
-  branches      CampusDriveBranch[]
-  gradYears     CampusDriveGradYear[]
   jobs          CampusDriveJob[]
   registrations CampusDriveRegistration[]
 
   @@index([collegeId, status])
   @@index([companyId, status])
   @@index([placementId])
-}
-
-model CampusDriveCourse {
-  driveId String
-  course  String
-
-  drive CampusDrive @relation(fields: [driveId], references: [id], onDelete: Cascade)
-
-  @@id([driveId, course])
-}
-
-model CampusDriveBranch {
-  driveId        String
-  specialisation String
-
-  drive CampusDrive @relation(fields: [driveId], references: [id], onDelete: Cascade)
-
-  @@id([driveId, specialisation])
-}
-
-model CampusDriveGradYear {
-  driveId String
-  year    Int
-
-  drive CampusDrive @relation(fields: [driveId], references: [id], onDelete: Cascade)
-
-  @@id([driveId, year])
 }
 
 /// The roles being offered at the visit.

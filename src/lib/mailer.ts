@@ -1,5 +1,6 @@
 import nodemailer, { type Transporter } from 'nodemailer';
 import { env } from '../config/env.js';
+import { sendViaSns, snsIsConfigured } from './mailSns.js';
 
 /**
  * Sending email.
@@ -21,6 +22,13 @@ export interface MailMessage {
   subject: string;
   text: string;
   html: string;
+  /**
+   * Who it comes from, when it is not the portal itself. Left out, it is
+   * MAIL_FROM - which is what every automatic message uses. Most relays will
+   * only accept a sender on a domain they are authorised for, so setting this
+   * to an unrelated address usually fails at the mail server, not here.
+   */
+  from?: string;
 }
 
 export type MailResult = { sent: true } | { sent: false; reason: string };
@@ -30,9 +38,19 @@ const NOT_CONFIGURED =
 
 let transport: Transporter | null = null;
 
-/** Whether this deployment can send anything at all. */
+/** Whether this deployment can send anything at all, by any route. */
 export function mailIsConfigured(): boolean {
-  return Boolean(env.SMTP_URL || env.SMTP_HOST);
+  return Boolean(env.SMTP_URL || env.SMTP_HOST) || snsIsConfigured();
+}
+
+/**
+ * Which way a message goes out. SMTP wins when both are set, so adding the
+ * notification service to a working deployment changes nothing until the SMTP
+ * settings come out.
+ */
+export function mailTransportName(): 'smtp' | 'sns' | null {
+  if (env.SMTP_URL || env.SMTP_HOST) return 'smtp';
+  return snsIsConfigured() ? 'sns' : null;
 }
 
 /** Who messages come from, for the UI to show before anybody commits to sending. */
@@ -62,14 +80,42 @@ function transporter(): Transporter {
 export async function sendMail(message: MailMessage): Promise<MailResult> {
   if (!mailIsConfigured()) return { sent: false, reason: NOT_CONFIGURED };
 
+  // No SMTP settings but a notification service configured: out over HTTP.
+  // Same contract either way, so nothing that calls sendMail has to know.
+  if (mailTransportName() === 'sns') return sendViaSns(message);
+
   try {
-    await transporter().sendMail({
-      from: env.MAIL_FROM,
+    const info = await transporter().sendMail({
+      from: message.from ?? env.MAIL_FROM,
       to: message.to,
       subject: message.subject,
       text: message.text,
       html: message.html,
     });
+
+    /*
+     * What the relay actually said, logged on every send.
+     *
+     * "Accepted" is only ever the relay's word: it has taken responsibility
+     * for the message, not delivered it. A recipient can still be in
+     * `rejected`, and a queued-then-bounced message looks identical here to
+     * one that arrived. Without this line, "the API returned 200 but nothing
+     * came" has no evidence behind it at all.
+     */
+    console.log(
+      `[mail] ${message.to}: id=${info.messageId} accepted=${JSON.stringify(info.accepted)} ` +
+        `rejected=${JSON.stringify(info.rejected)} response=${String(info.response ?? '').trim()}`,
+    );
+
+    // The relay took it but named this recipient as refused - which is a
+    // failure, however encouraging the rest of the response looks.
+    if (info.rejected?.length) {
+      return {
+        sent: false,
+        reason: `The mail server refused the recipient: ${info.rejected.join(', ')}. ${String(info.response ?? '').trim()}`,
+      };
+    }
+
     return { sent: true };
   } catch (err) {
     // The reason is shown to whoever pressed the button, so it says what the

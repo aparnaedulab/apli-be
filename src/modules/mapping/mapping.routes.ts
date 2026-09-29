@@ -9,8 +9,11 @@ import { requirePlatform, requireTenantId } from '../tenants/tenant.context.js';
 import { loadTenant, markStepById } from '../tenants/onboarding.service.js';
 import { addStudents, type AddStudentsResult, type StudentRow } from '../campus/students.service.js';
 import { buildStudentTemplate } from '../campus/students.template.js';
-import { rowsFromRequest } from '../campus/students.intake.js';
+import { intakeOptions, rowsFromRequest } from '../campus/students.intake.js';
 import { asWorkbook, workbookUpload } from '../../lib/upload.js';
+import { activeGenders } from '../students/lists.js';
+import { assertMayAdd, policyFor } from '../students/policy.js';
+import { programmeLabel } from '../students/programme.js';
 import {
   catalogue,
   setUniversityPrograms,
@@ -194,7 +197,10 @@ adminMappingRouter.post(
   asyncHandler(async (req, res) => {
     const tenantId = requireTenantId(req);
     const rows = await rowsFromRequest(req);
-    res.status(201).json(await addUniversityStudents(tenantId, rows, req.session.userId!));
+    assertMayAdd(await policyFor(tenantId), 'university');
+    const opts = intakeOptions(req);
+    const out = await addUniversityStudents(tenantId, rows, req.session.userId!, opts);
+    res.status(opts.dryRun ? 200 : 201).json(out);
   }),
 );
 
@@ -208,7 +214,29 @@ adminMappingRouter.get(
       orderBy: { code: 'asc' },
       select: { code: true },
     });
-    const buffer = await buildStudentTemplate({ collegeCodes: colleges.map((c) => c.code) });
+    // Every programme in the university, tagged with the college that runs
+    // it. A university sheet spans colleges, so this is a reference sheet
+    // rather than a dropdown - see buildStudentTemplate.
+    const programmes = await prisma.collegeProgram.findMany({
+      where: { college: { tenantId: requireTenantId(req) } },
+      select: {
+        college: { select: { code: true } },
+        course: { select: { name: true } },
+        specialisation: { select: { name: true } },
+      },
+    });
+
+    const buffer = await buildStudentTemplate({
+      collegeCodes: colleges.map((c) => c.code),
+      genders: await activeGenders(),
+      programmes: programmes
+        .map((p) => ({
+          collegeCode: p.college.code,
+          label: programmeLabel(p.course.name, p.specialisation?.name ?? null),
+        }))
+        .sort((a, z) => a.collegeCode.localeCompare(z.collegeCode) || a.label.localeCompare(z.label)),
+      policy: await policyFor(requireTenantId(req)),
+    });
     res.set(asWorkbook('University students.xlsx')).send(Buffer.from(buffer));
   }),
 );
@@ -217,6 +245,7 @@ async function addUniversityStudents(
   tenantId: string,
   rows: StudentRow[],
   sentById: string,
+  opts: { dryRun?: boolean; allowUnmapped?: boolean } = {},
 ): Promise<AddStudentsResult> {
   const colleges = await prisma.college.findMany({
     where: { tenantId },
@@ -228,7 +257,12 @@ async function addUniversityStudents(
     byKey.set(c.name.toLowerCase(), c.id);
   }
 
-  const result: AddStudentsResult = { created: [], skipped: [], batchesCreated: [] };
+  const result: AddStudentsResult = {
+    created: [],
+    skipped: [],
+    batchesCreated: [],
+    ...(opts.dryRun ? { dryRun: true } : {}),
+  };
   const groups = new Map<string | null, StudentRow[]>();
 
   for (const row of rows) {
@@ -246,7 +280,7 @@ async function addUniversityStudents(
   }
 
   for (const [collegeId, group] of groups) {
-    const part = await addStudents(collegeId, group, sentById, { tenantId });
+    const part = await addStudents(collegeId, group, sentById, { tenantId, ...opts });
     result.created.push(...part.created);
     result.skipped.push(...part.skipped);
     result.batchesCreated.push(...part.batchesCreated);
