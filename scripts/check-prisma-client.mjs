@@ -43,7 +43,7 @@ try {
   say([
     'The Prisma client has not been generated yet.',
     '',
-    '  npx prisma generate',
+    '  npm run db:generate',
     '',
     'Then build again.',
   ]);
@@ -60,9 +60,11 @@ if (same(schema) !== same(generated)) {
     'Every "has no exported member" and "does not exist on type PrismaClient"',
     'error you would get from this build is that, and nothing else.',
     '',
-    '  npx prisma generate',
-    '  npx prisma migrate deploy   # if the schema change added a migration',
+    '  npm run db:generate',
+    '  npm run db:migrate   # if the schema change added a migration',
     '',
-    'Then build again. (deploy.sh already does both; a manual build does not.)',
+    'Use those, not `npx prisma ...` directly: this project composes',
+    'DATABASE_URL from the MYSQL_* fields in code, and the Prisma CLI does',
+    'not run that code. src/scripts/prisma.ts is the wrapper that does.',
   ]);
 }
