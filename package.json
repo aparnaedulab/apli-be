@@ -18,6 +18,7 @@
     "prisma:studio": "prisma studio",
     "db:seed": "tsx prisma/seed.ts",
     "db:seed:test": "tsx prisma/seed-testdata.ts",
+    "db:seed:sppu": "tsx prisma/seed-sppu-demo.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "lint": "eslint src tests --ext .ts",
