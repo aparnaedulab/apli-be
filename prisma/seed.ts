@@ -30,12 +30,13 @@ import {
 import { prisma, disconnectPrisma } from '../src/lib/prisma.js';
 import { hashPassword } from '../src/modules/auth/auth.service.js';
 import { SYSTEM_ROLES } from '../src/modules/roles/permissions.js';
-import { CORE_KEYS } from '../src/modules/tenants/catalogue.js';
+import { MODULES } from '../src/modules/tenants/catalogue.js';
 import { seedAptitude } from '../src/scripts/seedAptitude.js';
 import { setCollegePrograms } from '../src/modules/mapping/mapping.service.js';
 import { savePolicy } from '../src/modules/students/policy.js';
 import { teachAlias } from '../src/modules/students/programme.js';
 import { seedDepth } from './seed-depth.js';
+import { seedInternships } from './seed-internships.js';
 
 /** Every seeded login shares it. Set DEMO_PASSWORD to choose another, as the other seeds do. */
 const PASSWORD = process.env.DEMO_PASSWORD || 'CampusHire2026';
@@ -743,11 +744,12 @@ async function main() {
       city: 'Pune',
       state: 'Maharashtra',
       website: 'https://www.demo-university.example',
-      plan: 'CUSTOM',
+      // The demo university shows everything, so every screen has something to show.
+      plan: 'COMPLETE',
       completedSteps: ONBOARDING_STEPS,
       launchedAt: new Date(),
       modules: {
-        create: CORE_KEYS.map((moduleKey) => ({ moduleKey, enabled: true })),
+        create: MODULES.map((m) => ({ moduleKey: m.key, enabled: true })),
       },
     },
   });
@@ -1310,6 +1312,15 @@ async function main() {
 
   // --- what each institution collects, and who may add a student ----------
   await seedIntake();
+
+  // --- virtual internships: what Apli.ai is for ----------------------------
+  console.log('Virtual internships…');
+  const internships = await seedInternships();
+  console.log(
+    `   ${internships.internships} published (+${internships.drafts} draft), ${internships.enrolments} students enrolled, ` +
+      `${internships.microProjects} paid micro-internships with ${internships.microApplications} applications`,
+  );
+  console.log('  ', internships.byStage);
 
   // --- done ---------------------------------------------------------------
   // The shared practice bank. Idempotent on its own, so it is safe even if

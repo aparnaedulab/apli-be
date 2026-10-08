@@ -200,7 +200,7 @@ describe('onboarding an institution', () => {
     const launched = await call('POST', `/platform/tenants/${id}/launch`);
     expect(launched.status).toBe(200);
     expect(launched.body.tenant.status).toBe('ACTIVE');
-    expect(launched.body.tenant.completedSteps).toHaveLength(9);
+    expect(launched.body.tenant.completedSteps).toHaveLength(10);
 
     const batches = await db.batch.findMany({ where: { tenantId: id } });
     expect(batches.map((b) => b.name).sort()).toEqual([`${course.name} 2027`, `${course.name} 2028`]);

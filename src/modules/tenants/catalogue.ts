@@ -581,6 +581,9 @@ const STARTER_MODULES = [
   'trust.tracker',
   'trust.whyNot',
   'compliance.consent',
+  // Virtual internships are what Apli.ai is for, so every plan has them.
+  'proof.passport',
+  'proof.simulations',
 ];
 
 const GROWTH_MODULES = [
