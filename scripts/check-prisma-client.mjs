@@ -49,9 +49,11 @@ try {
   ]);
 }
 
-// Line endings differ between a Windows checkout and a Linux one, and mean
-// nothing here.
-const same = (a) => a.replace(/\r\n/g, '\n').trim();
+// Whitespace means nothing here. Line endings differ between a Windows
+// checkout and a Linux one, and `prisma generate` saves its copy re-formatted
+// (fields aligned into columns), so an unformatted schema never matched it
+// character for character even straight after generating.
+const same = (a) => a.replace(/\s+/g, ' ').trim();
 
 if (same(schema) !== same(generated)) {
   say([

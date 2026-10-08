@@ -293,17 +293,17 @@ model Tenant {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  colleges      College[]
-  intakePolicy  StudentIntakePolicy?
-  batches       Batch[]
-  companyAccess TenantCompany[]
-  adminMembers  AdminMember[]
-  invites       Invite[]
-  modules       TenantModule[]
-  programs      TenantProgram[]
-  helpQuestions HelpQuestion[]
+  colleges           College[]
+  intakePolicy       StudentIntakePolicy?
+  batches            Batch[]
+  companyAccess      TenantCompany[]
+  adminMembers       AdminMember[]
+  invites            Invite[]
+  modules            TenantModule[]
+  programs           TenantProgram[]
+  helpQuestions      HelpQuestion[]
   interviewQuestions InterviewQuestion[]
-  notices       Notice[]
+  notices            Notice[]
 
   @@index([status])
 }
