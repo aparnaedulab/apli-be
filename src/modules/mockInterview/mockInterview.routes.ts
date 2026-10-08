@@ -8,7 +8,8 @@ import { requireCandidateId, requireRole } from '../../middleware/auth.js';
 import { requireModule } from '../tenants/tenant.context.js';
 import { aiEnabled, claudeReviewer, feedbackFor } from './ai.js';
 import type { Feedback } from './feedback.js';
-import { isRole, KINDS, questionById, questionsFor, ROLES, type InterviewKind, type RoleKey } from './questions.js';
+import { isRole, KINDS, questionsFor, ROLES, type InterviewKind, type Question, type RoleKey } from './questions.js';
+import { questionsForNewSession } from './bank.js';
 
 /**
  * Mock interviews with feedback (dev.mockInterview).
@@ -42,8 +43,18 @@ async function ownSession(candidateId: string, id: string) {
 
 type SessionRow = Awaited<ReturnType<typeof ownSession>>;
 
+/**
+ * The session's questions: the ones stored when it started, or - for a
+ * session from before they were stored - the built-in ones it was seeded with.
+ */
+function askedIn(session: SessionRow): Question[] {
+  const stored = session.questions as unknown as Question[] | null;
+  if (Array.isArray(stored) && stored.length > 0) return stored;
+  return questionsFor(session.kind as InterviewKind, session.role as RoleKey, session.id);
+}
+
 function view(session: SessionRow) {
-  const questions = questionsFor(session.kind as InterviewKind, session.role as RoleKey, session.id).map((q) => ({
+  const questions = askedIn(session).map((q) => ({
     id: q.id,
     text: q.text,
     type: q.type,
@@ -109,6 +120,13 @@ mockInterviewRouter.post(
     const candidateId = requireCandidateId(req);
     const { kind, role } = startSchema.parse(req.body);
     const created = await prisma.mockInterviewSession.create({ data: { candidateId, kind, role } });
+    // Fixed now, from the institution's own bank (or the defaults), so later
+    // edits to the bank cannot change a session in progress.
+    const questions = await questionsForNewSession(req.session.tenantId, kind, role as RoleKey, created.id);
+    await prisma.mockInterviewSession.update({
+      where: { id: created.id },
+      data: { questions: questions as unknown as object },
+    });
     res.status(201).json({ session: view(await ownSession(candidateId, created.id)) });
   }),
 );
@@ -130,8 +148,7 @@ mockInterviewRouter.post(
     const session = await ownSession(candidateId, req.params.id!);
     const input = answerSchema.parse(req.body);
 
-    const asked = questionsFor(session.kind as InterviewKind, session.role as RoleKey, session.id);
-    const question = asked.find((q) => q.id === input.questionId) ? questionById(input.questionId) : undefined;
+    const question = askedIn(session).find((q) => q.id === input.questionId);
     if (!question) throw badRequest('That question is not part of this session.');
     if (session.answers.some((a) => a.question === question.text)) {
       throw badRequest('You have already answered that one. Move on to the next question.');

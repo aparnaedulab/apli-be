@@ -37,7 +37,8 @@ import { savePolicy } from '../src/modules/students/policy.js';
 import { teachAlias } from '../src/modules/students/programme.js';
 import { seedDepth } from './seed-depth.js';
 
-const PASSWORD = 'CampusHire2026';
+/** Every seeded login shares it. Set DEMO_PASSWORD to choose another, as the other seeds do. */
+const PASSWORD = process.env.DEMO_PASSWORD || 'CampusHire2026';
 
 const SKILLS = [
   'Python', 'JavaScript', 'TypeScript', 'React', 'Node.js', 'PostgreSQL',

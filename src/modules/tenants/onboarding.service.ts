@@ -38,6 +38,8 @@ export const STEP_KEYS = [
   // Before the roster step anywhere, because everything downstream reads it.
   'students',
   'features',
+  // The questions and answers in the student help panel.
+  'help',
   'people',
   'review',
 ] as const;
@@ -1086,6 +1088,16 @@ export function checklistFor(state: State, hasModuleRows: boolean): ChecklistIte
       detail: hasModuleRows
         ? `${t.plan.toLowerCase()} · ${state.modules.length} modules`
         : 'Choose what this institution gets.',
+    },
+    {
+      step: 'help',
+      label: 'Student help',
+      // Optional: until it is saved, students see the platform's defaults.
+      done: t.completedSteps.includes('help'),
+      required: false,
+      detail: t.completedSteps.includes('help')
+        ? 'Questions and answers set for students'
+        : 'Optional - students see the standard questions until this is saved.',
     },
     {
       step: 'people',

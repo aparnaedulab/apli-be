@@ -141,6 +141,33 @@ const ALL = new Map<string, Question>(
   [...HR, ...MANAGERIAL, ...Object.values(TECHNICAL).flat()].map((x) => [x.id, x]),
 );
 
+export const QUESTION_TYPES: QuestionType[] = ['intro', 'behavioural', 'motivation', 'technical', 'situational'];
+
+/** The answer length a question of this type should get. */
+export function idealFor(type: QuestionType): [number, number] {
+  return WORDS[type];
+}
+
+/** The built-in questions for one round - what an institution starts from. */
+export function defaultQuestions(kind: InterviewKind, role: RoleKey | ''): Question[] {
+  if (kind === 'HR') return HR;
+  if (kind === 'MANAGERIAL') return MANAGERIAL;
+  return role ? TECHNICAL[role] : [];
+}
+
+/**
+ * Picks a session's questions from a pool, seeded by the session id. An HR
+ * round opens with an introduction question when the pool has one.
+ */
+export function pickFrom(pool: Question[], kind: InterviewKind, sessionId: string, count = 5): Question[] {
+  if (kind === 'HR') {
+    const intro = pool.find((x) => x.type === 'intro');
+    const rest = pool.filter((x) => x !== intro);
+    return intro ? [intro, ...shuffled(rest, sessionId).slice(0, count - 1)] : shuffled(rest, sessionId).slice(0, count);
+  }
+  return shuffled(pool, sessionId).slice(0, count);
+}
+
 export function questionById(id: string): Question | undefined {
   return ALL.get(id);
 }

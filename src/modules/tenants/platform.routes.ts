@@ -29,6 +29,7 @@ import {
   newCourseSchema,
   slugSchema,
 } from './onboarding.schemas.js';
+import { helpListSchema, saveTenantHelp, tenantHelp } from '../help/help.service.js';
 import { createBatches, createBatchesFromMapping, createCollege, deleteBatch, deleteCollege, updateCollege } from './onboarding.structure.js';
 import {
   completeOptionalStep,
@@ -418,6 +419,25 @@ platformRouter.put(
     const saved = await savePolicy(req.params.id!, intakePolicySchema.parse(req.body));
     await markStepById(req.params.id!, 'students');
     res.json({ ...describeIntake(saved), ...(await onboardingState(req.params.id!)) });
+  }),
+);
+
+/** GET /api/platform/tenants/:id/help - the student help questions, or the defaults to start from. */
+platformRouter.get(
+  '/tenants/:id/help',
+  can('college:read'),
+  asyncHandler(async (req, res) => {
+    res.json(await tenantHelp(req.params.id!));
+  }),
+);
+
+/** PUT /api/platform/tenants/:id/help - replaces the list, in the order sent. */
+platformRouter.put(
+  '/tenants/:id/help',
+  can('college:write'),
+  asyncHandler(async (req, res) => {
+    const saved = await saveTenantHelp(req.params.id!, helpListSchema.parse(req.body));
+    res.json({ ...saved, ...(await onboardingState(req.params.id!)) });
   }),
 );
 

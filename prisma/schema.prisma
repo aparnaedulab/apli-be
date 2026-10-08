@@ -301,6 +301,8 @@ model Tenant {
   invites       Invite[]
   modules       TenantModule[]
   programs      TenantProgram[]
+  helpQuestions HelpQuestion[]
+  interviewQuestions InterviewQuestion[]
   notices       Notice[]
 
   @@index([status])
@@ -2248,6 +2250,10 @@ model MockInterviewSession {
   /// HR, TECHNICAL or MANAGERIAL.
   kind        String
   role        String
+  /// The questions this session asks, fixed when it starts - so an
+  /// institution editing its list cannot change a session half-way through.
+  /// Null on sessions from before questions were stored.
+  questions   Json?
   createdAt   DateTime @default(now())
 
   candidate Candidate    @relation(fields: [candidateId], references: [id], onDelete: Cascade)
@@ -3167,4 +3173,47 @@ model CounsellingRequest {
 
   @@index([collegeId, status, createdAt])
   @@index([candidateId, createdAt])
+}
+
+/// A question and answer in the student help panel, written for one
+/// institution. Seeded from the platform's defaults when the institution's
+/// onboarding reaches the "Student help" step; an institution with none sees
+/// the defaults.
+model HelpQuestion {
+  id        String   @id @default(cuid())
+  tenantId  String
+  question  String   @db.VarChar(300)
+  answer    String   @db.Text
+  order     Int      @default(0)
+  /// Hidden questions are kept, not deleted, so they can be shown again.
+  isVisible Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, order])
+}
+
+/// A mock-interview question written by one institution, for one round
+/// (HR, TECHNICAL or MANAGERIAL) and, for technical rounds, one role. An
+/// institution with none for a round uses the platform's built-in questions.
+model InterviewQuestion {
+  id        String   @id @default(cuid())
+  tenantId  String
+  kind      String
+  /// The role, for a technical round; empty for HR and managerial.
+  role      String   @default("")
+  text      String   @db.VarChar(400)
+  /// intro, behavioural, motivation, technical or situational - it decides
+  /// what a good answer looks like in the feedback.
+  type      String
+  order     Int      @default(0)
+  isVisible Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, kind, role, order])
 }
