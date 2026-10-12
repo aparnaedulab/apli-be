@@ -103,6 +103,8 @@ platformRouter.get(
         select: {
           id: true,
           name: true,
+          level: true,
+          years: true,
           specialisations: {
             where: { isActive: true },
             orderBy: { name: 'asc' },
@@ -378,6 +380,20 @@ platformRouter.post(
   can('college:write'),
   asyncHandler(async (req, res) => {
     await completeOptionalStep(req.params.id!, req.params.step!);
+    res.json(await onboardingState(req.params.id!));
+  }),
+);
+
+/** PUT /api/platform/tenants/:id/students - what happens when a student signs up. */
+platformRouter.put(
+  '/tenants/:id/students',
+  can('college:write'),
+  asyncHandler(async (req, res) => {
+    const { welcomeEmail } = z.object({ welcomeEmail: z.boolean() }).parse(req.body);
+    await loadTenant(req.params.id!);
+    await prisma.tenant.update({ where: { id: req.params.id! }, data: { studentWelcomeEmail: welcomeEmail } });
+    // Students is the only part of Features decided so far, so saving it finishes the step.
+    await markStepById(req.params.id!, 'features');
     res.json(await onboardingState(req.params.id!));
   }),
 );

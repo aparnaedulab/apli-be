@@ -185,6 +185,8 @@ export const newBranchSchema = z.object({
 export const newCourseSchema = z.object({
   name: z.string().trim().min(2, 'Enter the course name, for example B.Tech.').max(80),
   branchIds: z.array(z.string().min(1)).max(60).default([]),
+  level: z.enum(['DIPLOMA', 'UG', 'PG', 'PHD']).optional(),
+  years: z.coerce.number().int().min(1).max(7).optional(),
 });
 
 const bulkName = z.string().trim().max(80).transform((v) => v.replace(/\s+/g, ' '));

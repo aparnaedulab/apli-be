@@ -48,6 +48,15 @@ const PUBLIC_ROUTES: ReadonlyArray<RegExp> = [
   /^\/public\/register\/[^/]+$/,
   /^\/public\/register$/,
 
+  // Open sign-up for any student: the college search, the course list, and
+  // the sign-up itself. No code and no approval - internships are open to all.
+  /^\/public\/colleges$/,
+  /^\/public\/cities$/, // city suggestions at student sign-up
+  /^\/public\/signup\/options$/,
+  /^\/public\/signup\/student$/,
+  // A university or college asking to partner. A request, not an account.
+  /^\/public\/partner-requests$/,
+
   // Mail, open on purpose so it can be driven from Postman without a session.
   // This makes anything that can reach the API able to send mail through this
   // server, as any sender the relay will accept. It is here for testing on a

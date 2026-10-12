@@ -1,12 +1,14 @@
 import { Router } from 'express';
 import { EnrolmentStatus, SimulationStatus } from '@prisma/client';
 import { z } from 'zod';
+import { checkWorkCertificate } from '../studentApp/studentApp.service.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import type { NextFunction, Request, Response } from 'express';
 import { requireCandidateId, requireCompanyId, requireRole } from '../../middleware/auth.js';
 import { forbidden, notFound } from '../../lib/errors.js';
 import { can } from '../roles/can.js';
 import { requireModule, tenantHasModule } from '../tenants/tenant.context.js';
+import { OPEN_STUDENT_MODULES } from '../tenants/catalogue.js';
 import {
   checkCertificate,
   createSimulation,
@@ -52,7 +54,8 @@ const student = requireRole('CANDIDATE');
 proofRouter.get(
   '/certificates/:code',
   asyncHandler(async (req, res) => {
-    const cert = await checkCertificate(req.params.code ?? '');
+    // Earlier certificates, and those from the rebuilt student app's work simulations.
+    const cert = (await checkCertificate(req.params.code ?? '')) ?? (await checkWorkCertificate(req.params.code ?? ''));
     if (!cert) throw notFound('This is not a valid certificate.');
     res.json({ certificate: cert });
   }),
@@ -211,6 +214,8 @@ const simulations = requireModule('proof.simulations');
 async function simulationsOrRound(req: Request, _res: Response, next: NextFunction) {
   try {
     if (await tenantHasModule(req.session.tenantId, 'proof.simulations')) return next();
+    // A student with no institution behind them has internships from the platform.
+    if (!req.session.tenantId && OPEN_STUDENT_MODULES.includes('proof.simulations')) return next();
     if (await hasRoundAccess(requireCandidateId(req), req.params.id!)) return next();
     next(forbidden('Your institution does not have this feature switched on.'));
   } catch (err) {

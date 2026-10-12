@@ -3,7 +3,7 @@ import { TenantStatus, type Tenant } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { forbidden } from '../../lib/errors.js';
 import { scopeOf, toPublicUser, type PublicUser } from '../auth/auth.service.js';
-import { CORE_KEYS } from './catalogue.js';
+import { CORE_KEYS, OPEN_STUDENT_MODULES } from './catalogue.js';
 
 type ScopedUser = Parameters<typeof scopeOf>[0];
 
@@ -125,6 +125,11 @@ export async function describeSession(req: Request, user: ScopedUser): Promise<S
   return {
     user: { ...base, tenantId: tenant?.id, isPlatform: req.session.isPlatform === true },
     tenant,
-    modules: tenant ? await enabledModules(tenant.id) : [],
+    // A student with no institution gets the open set rather than nothing.
+    modules: tenant
+      ? await enabledModules(tenant.id)
+      : user.role === 'CANDIDATE'
+        ? [...CORE_KEYS, ...OPEN_STUDENT_MODULES]
+        : [],
   };
 }

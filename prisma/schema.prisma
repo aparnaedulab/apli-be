@@ -275,6 +275,9 @@ model Tenant {
   /// account for the whole platform, so this is a yes from one institution
   /// being enough, not a gate each institution holds separately.
   unverifiedCompanyAccess Boolean      @default(false)
+  /// Whether a student who signs up at one of this institution's colleges is
+  /// sent a welcome email. Off until somebody decides it in onboarding.
+  studentWelcomeEmail     Boolean      @default(false)
 
   // --- what they bought
 
@@ -671,6 +674,8 @@ model Company {
 
   @@index([status])
   @@index([industryId])
+  workSimulations WorkSimulation[]
+  workSimulationShares WorkSimulationShare[]
 }
 
 /// An update on a company's page: a hire, a product, a campus visit.
@@ -794,6 +799,8 @@ enum RefKind {
   STATE
   NAAC_GRADE
   GENDER
+  /// The fields of work a student can say they want to try at sign-up.
+  CAREER_INTEREST
 }
 
 /// A course the university runs, kept by operations.
@@ -802,9 +809,22 @@ enum RefKind {
 /// asking for "B.E." and a roster recording "B.Tech" matched nobody and said
 /// nothing. The same treatment as CollegeType and Industry: operations keeps
 /// the list, everybody else picks from it.
+/// How far into their studies a course is.
+enum StudyLevel {
+  DIPLOMA
+  UG
+  PG
+  PHD
+}
+
 model Course {
   id        String   @id @default(cuid())
   name      String   @unique
+  /// Diploma, undergraduate, postgraduate or PhD. At sign-up the student picks
+  /// a level and is offered that level's courses.
+  level     StudyLevel?
+  /// How long it runs, in years: what turns a joining year into a batch.
+  years     Int?
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
 
@@ -884,10 +904,27 @@ model Candidate {
   id             String    @id @default(cuid())
   userId         String    @unique
   collegeId      String?
+  /// The college a student named at sign-up when it is not on Apli.ai, so no
+  /// College row exists to point at. Self-declared, and replaced by
+  /// `collegeId` if that college joins later.
+  otherCollege   String?
+  /// The college a student picked from the directory the platform team
+  /// keeps, when that college is not (yet) a partner on Apli.ai.
+  listingId      String?
+  /// DIPLOMA, UG, PG or PHD - asked at sign-up, so a postgraduate is not
+  /// offered work meant for a first-year.
+  degreeLevel    String?
+  /// Where the student lives, for internships that ask for a city.
+  city           String?
+  /// Up to three fields the student wants to try, picked at sign-up. What
+  /// they are shown first, not a limit on what they may do.
+  interests      Json?
   phone          String?
   dateOfBirth    DateTime?
   gender         String?
   graduationYear Int?
+  /// The year they joined the course; with graduationYear, their batch (2022 - 2026).
+  startYear      Int?
 
   /// The student's own course and branch, rather than their batch's.
   ///
@@ -980,6 +1017,20 @@ model Candidate {
   /// NONE, OCCASIONAL or FREQUENT - the values a role states in TRAVEL.
   openToTravel     String?
 
+  /// Sign-up, asked one step at a time after the account exists.
+  ///
+  /// `signupStep` is the step an open sign-up is waiting on, so a student who
+  /// closes the tab comes back to where they left off; null once finished,
+  /// and always null for a student their college put on Apli.ai.
+  signupStep      Int?
+  /// Up to three cities they would work in, besides their own.
+  preferredCities Json?
+  /// Up to five companies on Apli.ai they would like to work for, as ids.
+  /// What they are shown first; never shared with those companies as a list.
+  dreamCompanies  Json?
+  /// How they heard of Apli.ai, a key from HEARD_FROM.
+  heardFrom       String?
+
   /// The university's permanent registration number - SPPU issues a PRN, other
   /// universities call it an enrolment number. Distinct from a roll number,
   /// which belongs to the college and can change between years.
@@ -996,6 +1047,7 @@ model Candidate {
 
   user             User              @relation(fields: [userId], references: [id], onDelete: Cascade)
   college          College?          @relation(fields: [collegeId], references: [id], onDelete: SetNull)
+  listing          CollegeListing?   @relation(fields: [listingId], references: [id], onDelete: SetNull)
   collegeProgram   CollegeProgram?   @relation(fields: [collegeProgramId], references: [id], onDelete: SetNull)
   educations       Education[]
   experiences      Experience[]
@@ -1012,6 +1064,8 @@ model Candidate {
   aptitudeAttempts     AptitudeAttempt[]
   mockSessions         MockInterviewSession[]
   simulationEnrolments SimulationEnrolment[]
+  workSimulationRuns   WorkSimulationRun[]
+  dashboardDismissals  DashboardDismissal[]
   stories              CampusStory[]
   showcase             ShowcaseProfile?
   showcaseInvites      ShowcaseInvite[]
@@ -3216,4 +3270,289 @@ model InterviewQuestion {
   tenant Tenant @relation(fields: [tenantId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, kind, role, order])
+}
+
+// ---------------------------------------------------------------------------
+// Partnership requests from universities and colleges
+// ---------------------------------------------------------------------------
+
+enum PartnerKind {
+  UNIVERSITY
+  COLLEGE
+}
+
+enum PartnerRequestStatus {
+  NEW
+  CONTACTED
+  CLOSED
+}
+
+/// A university or college asking to bring Apli.ai to its students.
+///
+/// Institutions are free partners and are onboarded by the platform team, so
+/// this is a request rather than an account: it lands in the platform
+/// console, somebody gets in touch, and onboarding happens through the
+/// wizard. Nothing here signs anybody in.
+model PartnerRequest {
+  id              String               @id @default(cuid())
+  kind            PartnerKind
+  institutionName String
+  city            String
+  state           String?
+  contactName     String
+  contactRole     String
+  email           String
+  phone           String?
+  students        Int?
+  message         String?              @db.Text
+  status          PartnerRequestStatus @default(NEW)
+  createdAt       DateTime             @default(now())
+  updatedAt       DateTime             @updatedAt
+
+  @@index([status, createdAt])
+}
+
+/// A university or college students can pick at sign-up.
+///
+/// The directory the platform team keeps so a student's "Where do you
+/// study?" has an answer whether or not their institution has partnered.
+/// It is reference data, not an account: a listing signs nobody in and owns
+/// nothing. Partner colleges are offered from College; a listing that
+/// becomes a partner is hidden so one college is not offered twice.
+model CollegeListing {
+  id          String      @id @default(cuid())
+  kind        PartnerKind @default(COLLEGE)
+  name        String
+  city        String
+  state       String?
+  /// The university a college is affiliated to, typed as people say it.
+  affiliation String?
+  isActive    Boolean     @default(true)
+  createdAt   DateTime    @default(now())
+  updatedAt   DateTime    @updatedAt
+
+  candidates Candidate[]
+
+  @@unique([name, city])
+  @@index([isActive, name])
+}
+
+// --- work simulations (the student app, rebuilt) ----------------------------
+//
+// A company's short, self-paced piece of real work a student does to try a
+// field. Not an internship: nobody is hired or paid. The student app is built
+// on these, and on nothing from the earlier screens.
+
+enum WorkSimulationLevel {
+  BEGINNER
+  INTERMEDIATE
+  ADVANCED
+}
+
+enum WorkSimulationStatus {
+  /// Being written by the company.
+  DRAFT
+  /// Sent to Apli.ai to check before students can see it.
+  SUBMITTED
+  /// Sent back by Apli.ai with a note; with the company again.
+  CHANGES_ASKED
+  /// Open to students.
+  LIVE
+  /// Closed to new students; those part way through can finish.
+  RETIRED
+}
+
+enum RunStatus {
+  /// Handing in tasks.
+  ACTIVE
+  /// Every task handed in and explained; waiting for a reviewer.
+  IN_REVIEW
+  /// A reviewer asked for changes; back with the student.
+  NEEDS_WORK
+  /// Approved: the certificate is issued and verified.
+  COMPLETED
+  LEFT
+}
+
+/// One work simulation: a handful of tasks set by a company's team.
+model WorkSimulation {
+  id          String           @id @default(cuid())
+  /// The address students see: /student/simulations/<slug>.
+  slug        String           @unique
+  companyId   String
+  title       String
+  /// Two or three sentences: the card, and the top of the page.
+  summary     String           @db.Text
+  /// The longer story, in the company's words: why this work matters to them
+  /// and what a student will get from trying it.
+  about       String?          @db.Text
+  /// A wide picture for the card and the top of the page.
+  coverUrl    String?          @db.VarChar(500)
+  /// A short introduction from the team, as a YouTube or Vimeo link.
+  videoUrl    String?          @db.VarChar(500)
+  /// The career interest it belongs to - one of the platform's list - so it
+  /// can be suggested to students who picked that field.
+  field       String
+  level       WorkSimulationLevel  @default(BEGINNER)
+  /// Roughly how long the whole thing takes.
+  hours       Int              @default(4)
+  /// ["Excel", "Forecasting"]
+  skills      Json             @default("[]")
+  status      WorkSimulationStatus @default(DRAFT)
+  publishedAt DateTime?
+  /// When the company last sent it to be checked, and what Apli.ai said.
+  submittedAt DateTime?
+  reviewedAt  DateTime?
+  reviewNote  String?          @db.Text
+  createdById String?
+  createdAt   DateTime         @default(now())
+  updatedAt   DateTime         @updatedAt
+
+  company Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  tasks   WorkSimulationTask[]
+  runs    WorkSimulationRun[]
+
+  @@index([status, field])
+}
+
+model WorkSimulationTask {
+  id           String @id @default(cuid())
+  simulationId String
+  position     Int
+  title        String
+  brief        String  @db.Text
+  /// What the student hands in for it - "a one-page summary", "a link to your sheet".
+  handIn       String? @db.Text
+  /// What the task teaches, as short points: ["How lenders read cash flow", ...].
+  learn        Json    @default("[]")
+  /// What the student does, step by step: ["Read the two sheets", "Match each payment", ...].
+  /// The brief says why and with what; these say what, in order.
+  steps        Json    @default("[]")
+  /// What the student goes through before handing in, in order: pages to read
+  /// and quick checks to answer. See companyApp.pages.ts for their shape.
+  pages        Json    @default("[]")
+  /// How a student may hand it in: any of "text", "link", "file". At least one.
+  handInKinds  Json    @default("[\"text\",\"link\",\"file\"]")
+  minutes      Int     @default(45)
+
+  simulation WorkSimulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  done       WorkSimulationTaskDone[]
+  checks     WorkSimulationCheckAnswer[]
+
+  @@unique([simulationId, position])
+}
+
+/// A student doing one work simulation.
+model WorkSimulationRun {
+  id              String    @id @default(cuid())
+  simulationId    String
+  candidateId     String
+  status          RunStatus @default(ACTIVE)
+  startedAt       DateTime  @default(now())
+  /// Moves with every task finished, so "pick up where you left off" is the latest.
+  lastActiveAt    DateTime  @default(now())
+  completedAt     DateTime?
+  /// Printed on the certificate; anyone can check it.
+  certificateCode String?   @unique
+
+  /// "Explain your work", in the student's words, after the last task: how
+  /// they went about it and what they would do differently. A reviewer reads
+  /// it beside the work - it is what stops copied work passing.
+  explainHow      String?   @db.Text
+  explainChange   String?   @db.Text
+  submittedAt     DateTime?
+  reviewedAt      DateTime?
+  reviewedById    String?
+  /// What the reviewer said - the reason, when they asked for changes.
+  reviewNote      String?   @db.Text
+
+  simulation WorkSimulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  candidate  Candidate         @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  done       WorkSimulationTaskDone[]
+  shares     WorkSimulationShare[]
+  review     WorkSimulationReview?
+  checks     WorkSimulationCheckAnswer[]
+
+  @@unique([simulationId, candidateId])
+  @@index([candidateId, status])
+}
+
+/// A task handed in: what the student wrote, a link to what they made, a file, or any of them.
+model WorkSimulationTaskDone {
+  id     String   @id @default(cuid())
+  runId  String
+  taskId String
+  answer   String?  @db.Text
+  link     String?  @db.VarChar(500)
+  /// A file they uploaded - a PDF or a picture - and the name it had on their machine.
+  fileUrl  String?  @db.VarChar(500)
+  fileName String?  @db.VarChar(200)
+  doneAt   DateTime @default(now())
+
+  run  WorkSimulationRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task WorkSimulationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, taskId])
+}
+
+/// A student's word on a simulation they finished: stars, and a line or two
+/// for the next student. One per finished run.
+model WorkSimulationReview {
+  id        String   @id @default(cuid())
+  runId     String   @unique
+  /// 1 to 5.
+  stars     Int
+  comment   String?  @db.Text
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  run WorkSimulationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+}
+
+/// A student's answers to one quick check in a task, marked by the server.
+/// Answering again replaces it; the latest is what a reviewer sees.
+model WorkSimulationCheckAnswer {
+  id        String   @id @default(cuid())
+  runId     String
+  taskId    String
+  /// The page's id inside the task's `pages`.
+  pageId    String   @db.VarChar(40)
+  answers   Json
+  score     Int
+  total     Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  run  WorkSimulationRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task WorkSimulationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, taskId, pageId])
+}
+
+/// A company a student chose to let see one finished, verified simulation.
+/// Nothing is shared until they choose.
+model WorkSimulationShare {
+  id        String   @id @default(cuid())
+  runId     String
+  companyId String
+  createdAt DateTime @default(now())
+
+  run     WorkSimulationRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  company Company           @relation(fields: [companyId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, companyId])
+}
+
+/// A card a student closed on their dashboard, so it stays closed.
+model DashboardDismissal {
+  id          String   @id @default(cuid())
+  candidateId String
+  /// What was closed: "suggestion" (a simulation offered) or "run" (one in progress).
+  kind        String   @db.VarChar(20)
+  refId       String
+  createdAt   DateTime @default(now())
+
+  candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+
+  @@unique([candidateId, kind, refId])
 }

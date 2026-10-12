@@ -2,6 +2,7 @@ import type { NextFunction, Request, Response } from 'express';
 import type { Prisma } from '@prisma/client';
 import { forbidden, unauthorized } from '../../lib/errors.js';
 import { prisma } from '../../lib/prisma.js';
+import { OPEN_STUDENT_MODULES } from './catalogue.js';
 
 /**
  * Which institution a request is acting inside, and the one way to ask.
@@ -129,6 +130,11 @@ export function requireModule(moduleKey: string) {
     try {
       const tenantId = req.session.tenantId;
       if (!tenantId) {
+        // A student with no institution behind them still has the open set.
+        if (req.session.role === 'CANDIDATE' && OPEN_STUDENT_MODULES.includes(moduleKey)) {
+          next();
+          return;
+        }
         next(forbidden('This feature belongs to an institution, and none is selected.'));
         return;
       }

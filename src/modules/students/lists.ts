@@ -11,6 +11,16 @@ import { prisma } from '../../lib/prisma.js';
  * spelling.
  */
 
+/** The career interests the platform team keeps, in the order they are listed. */
+export async function activeInterests(): Promise<string[]> {
+  const rows = await prisma.refValue.findMany({
+    where: { kind: RefKind.CAREER_INTEREST, isActive: true },
+    orderBy: [{ position: 'asc' }, { value: 'asc' }],
+    select: { value: true },
+  });
+  return rows.map((r) => r.value);
+}
+
 /** The genders operations keeps, in the order they are listed. */
 export async function activeGenders(): Promise<string[]> {
   const rows = await prisma.refValue.findMany({

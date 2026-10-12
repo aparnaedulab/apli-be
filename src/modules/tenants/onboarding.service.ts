@@ -5,6 +5,7 @@ import {
   TenantKind,
   TenantStatus,
   type Tenant,
+  type StudyLevel,
 } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { AppError, badRequest, conflict, notFound } from '../../lib/errors.js';
@@ -31,6 +32,8 @@ import type {
 export const STEP_KEYS = [
   'identity',
   'academics',
+  // The career interests students pick from at sign-up (one shared list).
+  'interests',
   'colleges',
   'mapping',
   'batches',
@@ -73,7 +76,8 @@ export async function markStepById(id: string, step: StepKey): Promise<void> {
 }
 
 /** Steps a person may pass without adding anything. */
-const SKIPPABLE: StepKey[] = ['mapping', 'batches'];
+// 'interests' edits a shared list, so finishing it is just saying so.
+const SKIPPABLE: StepKey[] = ['mapping', 'batches', 'interests'];
 
 export async function completeOptionalStep(id: string, step: string): Promise<void> {
   if (!SKIPPABLE.includes(step as StepKey)) throw badRequest('That step cannot be skipped.');
@@ -296,6 +300,8 @@ export async function saveAcademics(id: string, input: AcademicsInput) {
 const COURSE_SELECT = {
   id: true,
   name: true,
+  level: true,
+  years: true,
   specialisations: {
     where: { isActive: true },
     orderBy: { name: 'asc' },
@@ -359,10 +365,16 @@ async function linkBranches(tx: Prisma.TransactionClient, courseId: string, bran
  * master list. A course name that already exists (in any letter case) is not
  * duplicated: the branches are added to the existing course instead.
  */
-export async function addCourse(input: { name: string; branchIds: string[] }) {
+export async function addCourse(input: {
+  name: string;
+  branchIds: string[];
+  level?: StudyLevel;
+  years?: number;
+}) {
   return prisma.$transaction(async (tx) => {
     const existing = await tx.course.findFirst({ where: { name: input.name } });
-    const course = existing ?? (await tx.course.create({ data: { name: input.name } }));
+    const course =
+      existing ?? (await tx.course.create({ data: { name: input.name, level: input.level, years: input.years } }));
     if (existing && !existing.isActive) {
       await tx.course.update({ where: { id: existing.id }, data: { isActive: true } });
     }

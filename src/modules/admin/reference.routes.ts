@@ -10,7 +10,7 @@ import { can } from '../roles/can.js';
 
 /**
  * The small vocabularies operations keeps: cities, states, NAAC grades,
- * genders.
+ * genders, and the career interests students pick from.
  *
  * One router for all of them because they behave identically - a list of
  * names, added to and retired, with nothing hanging off any entry. Courses,
@@ -55,6 +55,8 @@ async function usageOf(kind: RefKind, value: string): Promise<number> {
       return prisma.college.count({ where: { naacGrade: value } });
     case RefKind.GENDER:
       return prisma.candidate.count({ where: { gender: value } });
+    case RefKind.CAREER_INTEREST:
+      return prisma.candidate.count({ where: { interests: { array_contains: value } } });
   }
 }
 
@@ -162,6 +164,20 @@ referenceRouter.patch(
           where: { naacGrade: row.value },
           data: { naacGrade: to },
         });
+      } else if (row.kind === RefKind.CAREER_INTEREST) {
+        // Kept inside each student's list, so each list is rewritten.
+        const picked = await prisma.candidate.findMany({
+          where: { interests: { array_contains: row.value } },
+          select: { id: true, interests: true },
+        });
+        await prisma.$transaction(
+          picked.map((c) =>
+            prisma.candidate.update({
+              where: { id: c.id },
+              data: { interests: (c.interests as string[]).map((i) => (i === row.value ? to : i)) },
+            }),
+          ),
+        );
       } else {
         await prisma.candidate.updateMany({ where: { gender: row.value }, data: { gender: to } });
       }

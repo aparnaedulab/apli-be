@@ -147,8 +147,19 @@ async function seedPrograms() {
   /** courseName -> branchName -> specialisation id, for the Map data below. */
   const specId = new Map<string, Map<string, string>>();
 
+  /** Level and length, so sign-up can offer each level its courses and build batches. */
+  const SHAPE: Record<string, { level: 'UG' | 'PG'; years: number }> = {
+    'B.Tech': { level: 'UG', years: 4 },
+    'B.E.': { level: 'UG', years: 4 },
+    'M.Tech': { level: 'PG', years: 2 },
+    MCA: { level: 'PG', years: 2 },
+    MBA: { level: 'PG', years: 2 },
+    'B.Sc': { level: 'UG', years: 3 },
+    'B.Com': { level: 'UG', years: 3 },
+  };
+
   for (const [name, taught] of Object.entries(COURSES)) {
-    const c = await prisma.course.create({ data: { name } });
+    const c = await prisma.course.create({ data: { name, ...SHAPE[name] } });
     courseId.set(name, c.id);
 
     const mine = new Map<string, string>();
@@ -676,6 +687,11 @@ async function main() {
     [RefKind.NAAC_GRADE]: ['A++', 'A+', 'A', 'B++', 'B+', 'B', 'C'],
     // The four the eligibility matcher already knows how to read.
     [RefKind.GENDER]: ['Female', 'Male', 'Other', 'Prefer not to say'],
+    // What students can say they want to try at sign-up.
+    [RefKind.CAREER_INTEREST]: [
+      'Software', 'Data', 'Design', 'Finance', 'Marketing', 'Consulting',
+      'Engineering', 'Security', 'Operations', 'Human resources', 'Healthcare', 'Law',
+    ],
   };
   for (const [kind, values] of Object.entries(REFERENCE)) {
     await prisma.refValue.createMany({

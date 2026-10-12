@@ -77,6 +77,11 @@ import { companyAccessRouter } from './modules/companyAccess/companyAccess.route
 import { institutionRulesRouter } from './modules/admin/institutionRules.routes.js';
 import { intakeRouter } from './modules/students/intake.routes.js';
 import { registerRouter } from './modules/students/register.routes.js';
+import { signupRouter } from './modules/students/signup.routes.js';
+import { companyAppRouter, simulationCheckRouter } from './modules/companyApp/companyApp.routes.js';
+import { simulationReviewRouter, studentAppRouter } from './modules/studentApp/studentApp.routes.js';
+import { listingsRouter } from './modules/students/listings.routes.js';
+import { partnerAdminRouter, partnerPublicRouter } from './modules/partners/partners.routes.js';
 import {
   adminMappingRouter,
   campusMappingRouter,
@@ -87,7 +92,17 @@ export function createApp(): Express {
   const app = express();
 
   app.set('trust proxy', 1);
-  app.use(helmet());
+  app.use(
+    helmet({
+      contentSecurityPolicy: {
+        directives: {
+          ...helmet.contentSecurityPolicy.getDefaultDirectives(),
+          // A work simulation's intro video: only these two players, nothing else framed.
+          'frame-src': ["'self'", 'https://www.youtube-nocookie.com', 'https://player.vimeo.com'],
+        },
+      },
+    }),
+  );
   app.use(morgan(isProduction ? 'combined' : 'dev'));
   app.use(express.json({ limit: '1mb' }));
   app.use(express.urlencoded({ extended: true }));
@@ -161,6 +176,10 @@ export function createApp(): Express {
 
   api.use('/auth', authRouter);
   api.use('/notifications', notificationRouter);
+  // The rebuilt student app: dashboard and virtual internships.
+  api.use('/student-app', studentAppRouter);
+  // The rebuilt company app: writing simulations and reviewing students' work.
+  api.use('/company-app', companyAppRouter);
   // Institution notices. The GET is open to every role - the router decides
   // who a notice was addressed to - and everything that writes is ADMIN only.
   api.use('/notices', noticeRouter);
@@ -169,11 +188,17 @@ export function createApp(): Express {
   // Before /platform, so the bulk router's own guards apply to its paths.
   api.use('/platform/bulk', platformBulkRouter);
   api.use('/platform/tenants/:tenantId/mapping', platformMappingRouter);
+  api.use('/platform/partner-requests', partnerAdminRouter);
+  api.use('/platform/listings', listingsRouter);
+  api.use('/platform/reviews', simulationReviewRouter);
+  api.use('/platform/simulations', simulationCheckRouter);
   api.use('/platform', platformRouter);
   api.use('/public', publicTenantRouter);
   // A student putting themselves on their college's roster, when the
   // institution has switched that on.
   api.use('/public', registerRouter);
+  api.use('/public', signupRouter);
+  api.use('/public', partnerPublicRouter);
   api.use('/company-access', companyAccessRouter);
   api.use('/files', filesRouter);
   // Phase 1, the trust core. Each router fences itself (role, module, scope).

@@ -562,6 +562,20 @@ export function moduleByKey(key: string): ModuleDefinition | undefined {
 
 export const CORE_KEYS = MODULES.filter((m) => m.core).map((m) => m.key);
 
+/**
+ * What a student gets when no institution stands behind them: somebody who
+ * signed up on their own, from a college that is not on Apli.ai. Virtual
+ * internships are open to every student, so these are switched on for them
+ * by the platform rather than by a university - everything else (jobs,
+ * drives, reports) belongs to an institution and stays off.
+ */
+export const OPEN_STUDENT_MODULES: readonly string[] = [
+  'proof.passport',
+  'proof.simulations',
+  'proof.microInternships',
+  'compliance.consent',
+];
+
 /* -------------------------------------------------------------------------- */
 /* Plans                                                                       */
 /* -------------------------------------------------------------------------- */

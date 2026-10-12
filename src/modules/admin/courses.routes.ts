@@ -41,6 +41,12 @@ const nameSchema = z.object({
     .regex(/^[A-Za-z0-9 &.()\-/]+$/, 'Letters, numbers, spaces and & . ( ) - / only.'),
 });
 
+/** Its level and how many years it runs: what sign-up's batch list is built from. */
+const shapeSchema = z.object({
+  level: z.enum(['DIPLOMA', 'UG', 'PG', 'PHD']).nullable().optional(),
+  years: z.coerce.number().int().min(1, 'At least a year.').max(7, 'At most seven years.').nullable().optional(),
+});
+
 /** How many records would be orphaned if this course vanished. */
 async function usageOf(name: string) {
   const [batches, candidates, jobs] = await Promise.all([
@@ -73,6 +79,8 @@ coursesRouter.get(
       courses: courses.map((c, i) => ({
         id: c.id,
         name: c.name,
+        level: c.level,
+        years: c.years,
         isActive: c.isActive,
         inUse: usage[i]!.total,
         branches: branches
@@ -92,7 +100,7 @@ coursesRouter.post(
   '/',
   can('settings:write'),
   asyncHandler(async (req, res) => {
-    const { name } = nameSchema.parse(req.body);
+    const { name, level, years } = nameSchema.merge(shapeSchema).parse(req.body);
 
     const existing = await prisma.course.findFirst({ where: { name } });
     if (existing) {
@@ -109,7 +117,7 @@ coursesRouter.post(
       throw conflict(`${existing.name} is already on the list.`);
     }
 
-    res.status(201).json({ course: await prisma.course.create({ data: { name } }) });
+    res.status(201).json({ course: await prisma.course.create({ data: { name, level, years } }) });
   }),
 );
 
@@ -154,7 +162,7 @@ coursesRouter.patch(
   '/:id',
   can('settings:write'),
   asyncHandler(async (req, res) => {
-    const data = nameSchema.partial().extend({ isActive: z.boolean().optional() }).parse(req.body);
+    const data = nameSchema.partial().merge(shapeSchema).extend({ isActive: z.boolean().optional() }).parse(req.body);
 
     const course = await prisma.course.findUnique({ where: { id: req.params.id } });
     if (!course) throw notFound('No such course.');
@@ -191,6 +199,8 @@ coursesRouter.patch(
       data: {
         ...(data.name ? { name: data.name } : {}),
         ...(data.isActive !== undefined ? { isActive: data.isActive } : {}),
+        ...(data.level !== undefined ? { level: data.level } : {}),
+        ...(data.years !== undefined ? { years: data.years } : {}),
       },
     });
 
