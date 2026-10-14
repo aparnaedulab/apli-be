@@ -157,6 +157,7 @@ model User {
   companiesReviewed Company[]              @relation("CompanyReviewer")
   companyPosts      CompanyPost[]          @relation("CompanyPostAuthor")
   interviewProcesses InterviewProcess[]    @relation("InterviewProcessCreator")
+  interviewInvitesSent InterviewInvite[]   @relation("InterviewInviteSender")
   assessmentsSet    Assessment[]           @relation("AssessmentAuthor")
   assessmentsMarked AssessmentAssignment[] @relation("AssessmentReviewer")
   posts             Post[]                 @relation("PostAuthor")

@@ -285,14 +285,31 @@ export async function respondToInvite(
 
 /* ── formatters ────────────────────────────────────────────────────────── */
 
-type FullCompanyInvite = Awaited<ReturnType<typeof prisma.interviewInvite.findUniqueOrThrow>> & {
-  candidate: { user: { fullName: string; email: string } } & { phone?: string | null };
-  process: { title: string; processType: string; rounds?: { order: number; name: string; type: string; isElimination: boolean; durationMin: number | null; isOnline: boolean; meetingLink: string | null; addressLine: string | null }[] };
-  roundFeedbacks: { roundOrder: number; roundName: string; outcome: string; score: number | null; notes: string | null }[];
-  sentBy?: { fullName: string } | null;
-};
+function formatFeedbacks(feedbacks: { roundOrder: number; roundName: string; outcome: string; score: { toNumber(): number } | null; notes: string | null }[]) {
+  return feedbacks.map((f) => ({
+    roundOrder: f.roundOrder,
+    roundName: f.roundName,
+    outcome: f.outcome,
+    score: f.score !== null ? f.score.toNumber() : null,
+    notes: f.notes,
+  }));
+}
 
-function formatCompanyInvite(inv: FullCompanyInvite) {
+function formatCompanyInvite(inv: {
+  id: string;
+  candidateId: string;
+  processId: string;
+  role: string;
+  message: string | null;
+  status: string;
+  currentRoundOrder: number;
+  createdAt: Date;
+  respondedAt: Date | null;
+  candidate: { user: { fullName: string; email: string } };
+  process: { title: string; processType: string; rounds?: { order: number; name: string; type: string; isElimination: boolean; durationMin: number | null; isOnline: boolean; meetingLink: string | null; addressLine: string | null }[] };
+  roundFeedbacks: { roundOrder: number; roundName: string; outcome: string; score: { toNumber(): number } | null; notes: string | null }[];
+  sentBy?: { fullName: string } | null;
+}) {
   return {
     id: inv.id,
     role: inv.role,
@@ -310,20 +327,25 @@ function formatCompanyInvite(inv: FullCompanyInvite) {
       id: inv.processId,
       title: inv.process.title,
       processType: inv.process.processType,
-      rounds: 'rounds' in inv.process ? inv.process.rounds : [],
+      rounds: inv.process.rounds ?? [],
     },
-    roundFeedbacks: inv.roundFeedbacks,
+    roundFeedbacks: formatFeedbacks(inv.roundFeedbacks),
     sentBy: inv.sentBy?.fullName ?? null,
   };
 }
 
-type FullStudentInvite = Awaited<ReturnType<typeof prisma.interviewInvite.findUniqueOrThrow>> & {
+function formatStudentInvite(inv: {
+  id: string;
+  role: string;
+  message: string | null;
+  status: string;
+  currentRoundOrder: number;
+  createdAt: Date;
+  respondedAt: Date | null;
   company: { name: string; logoUrl: string | null };
   process: { title: string; processType: string; rounds: { order: number; name: string; type: string; isElimination: boolean; durationMin: number | null; isOnline: boolean; description: string | null }[] };
-  roundFeedbacks: { roundOrder: number; roundName: string; outcome: string; score: number | null; notes: string | null }[];
-};
-
-function formatStudentInvite(inv: FullStudentInvite) {
+  roundFeedbacks: { roundOrder: number; roundName: string; outcome: string; score: { toNumber(): number } | null; notes: string | null }[];
+}) {
   return {
     id: inv.id,
     role: inv.role,
@@ -338,6 +360,6 @@ function formatStudentInvite(inv: FullStudentInvite) {
       processType: inv.process.processType,
       rounds: inv.process.rounds,
     },
-    roundFeedbacks: inv.roundFeedbacks,
+    roundFeedbacks: formatFeedbacks(inv.roundFeedbacks),
   };
 }
