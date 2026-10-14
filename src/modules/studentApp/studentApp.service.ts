@@ -3,6 +3,7 @@ import { CompanyStatus, Prisma, RunStatus, WorkSimulationStatus } from '@prisma/
 import { prisma } from '../../lib/prisma.js';
 import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import {
+  asShown,
   checkPageIds,
   complete,
   forStudent,
@@ -377,7 +378,11 @@ export async function simulationDetail(candidateId: string, slug: string) {
       submittedAt: true,
       reviewNote: true,
       done: { select: { taskId: true, answer: true, link: true, fileUrl: true, fileName: true, doneAt: true } },
-      checks: { select: { taskId: true, pageId: true, answers: true } },
+      checks: { select: { taskId: true, pageId: true, answers: true, revealedAt: true } },
+      attempts: {
+        orderBy: { number: 'asc' },
+        select: { taskId: true, pageId: true, number: true, score: true, total: true, createdAt: true, sentAt: true },
+      },
       shares: { select: { company: { select: { id: true, name: true } } } },
       review: { select: { stars: true, comment: true } },
     },
@@ -431,7 +436,11 @@ export async function simulationDetail(candidateId: string, slug: string) {
         steps: list(t.steps),
         pages: forStudent(pages),
         handInKinds: readHandInKinds(t.handInKinds),
-        checks: markedChecks(pages, (run?.checks ?? []).filter((c) => c.taskId === t.id)),
+        checks: markedChecks(
+          pages,
+          (run?.checks ?? []).filter((c) => c.taskId === t.id),
+          (run?.attempts ?? []).filter((a) => a.taskId === t.id),
+        ),
         done: Boolean(h),
         handedIn: h ? { answer: h.answer, link: h.link, fileUrl: h.fileUrl, fileName: h.fileName, at: h.doneAt } : null,
       };
@@ -540,43 +549,123 @@ export async function startSimulation(candidateId: string, slug: string) {
 }
 
 /** A student's answered checks in one task, marked again against the task as it is now. */
-function markedChecks(pages: ReturnType<typeof readPages>, answered: { pageId: string; answers: unknown }[]) {
-  const out: Record<string, { answers: Answers; score: number; total: number; questions: ReturnType<typeof mark>['questions'] }> = {};
+type Attempt = { pageId: string; number: number; score: number; total: number; createdAt: Date; sentAt: Date | null };
+
+/**
+ * Each answered check in a task: the latest try, marked; every try so far;
+ * and whether the student has chosen to see the answers. Until they have,
+ * the marks say right or not, but not what the right answer was.
+ */
+function markedChecks(
+  pages: ReturnType<typeof readPages>,
+  answered: { pageId: string; answers: unknown; revealedAt: Date | null }[],
+  attempts: Attempt[],
+) {
+  const out: Record<
+    string,
+    ReturnType<typeof mark> & {
+      answers: Answers;
+      revealed: boolean;
+      tries: { number: number; score: number; total: number; at: Date; sentAt: Date | null }[];
+    }
+  > = {};
   for (const a of answered) {
     const page = pages.find((p): p is CheckPage => p.id === a.pageId && p.kind === 'check');
     if (!page) continue;
     const answers = (a.answers ?? {}) as Answers;
-    out[a.pageId] = { answers, ...mark(page, answers) };
+    const revealed = Boolean(a.revealedAt);
+    out[a.pageId] = {
+      answers,
+      ...asShown(mark(page, answers), revealed),
+      revealed,
+      tries: attempts
+        .filter((x) => x.pageId === a.pageId)
+        .map((x) => ({ number: x.number, score: x.score, total: x.total, at: x.createdAt, sentAt: x.sentAt })),
+    };
   }
   return out;
 }
 
 /**
- * Marks a quick check inside a task and keeps the answers. It can be answered
- * again; the latest counts. Only a task the student has reached - the next
- * one, or one already handed in - can be answered.
+ * Marks a quick check inside a task and keeps the answers as a new try. It
+ * can be taken again as often as the student likes - the latest try counts -
+ * until they choose to see the answers. Only a task the student has reached -
+ * the next one, or one already handed in - can be answered, and not while
+ * the work is with a reviewer.
  */
 export async function answerCheck(candidateId: string, slug: string, taskId: string, pageId: string, answers: Answers) {
   const { row, run } = await runFor(candidateId, slug);
   const task = await prisma.workSimulationTask.findFirst({ where: { id: taskId, simulationId: row.id }, select: { pages: true } });
   if (!task) throw notFound('No such task.');
-  if (run.status === RunStatus.IN_REVIEW || run.status === RunStatus.COMPLETED) {
-    throw conflict('This is already handed in.');
-  }
+  if (run.status === RunStatus.IN_REVIEW) throw conflict('This is with a reviewer. You can take it again once they reply.');
   const done = new Set(run.done.map((d) => d.taskId));
   const next = row.tasks.find((t) => !done.has(t.id));
   if (!done.has(taskId) && next?.id !== taskId) throw badRequest('Work through the tasks in order.');
 
   const page = readPages(task.pages).find((p): p is CheckPage => p.id === pageId && p.kind === 'check');
   if (!page) throw notFound('No such check.');
+  const before = await prisma.workSimulationCheckAnswer.findUnique({
+    where: { runId_taskId_pageId: { runId: run.id, taskId, pageId } },
+    select: { revealedAt: true },
+  });
+  if (before?.revealedAt) throw conflict('You have seen the answers to this test, so it cannot be taken again.');
   if (!complete(page, answers)) throw badRequest('Answer every question first.');
   const result = mark(page, answers);
-  await prisma.workSimulationCheckAnswer.upsert({
+  const tries = await prisma.workSimulationCheckAttempt.count({ where: { runId: run.id, taskId, pageId } });
+  await prisma.$transaction([
+    prisma.workSimulationCheckAttempt.create({
+      data: { runId: run.id, taskId, pageId, number: tries + 1, answers, score: result.score, total: result.total },
+    }),
+    prisma.workSimulationCheckAnswer.upsert({
+      where: { runId_taskId_pageId: { runId: run.id, taskId, pageId } },
+      create: { runId: run.id, taskId, pageId, answers, score: result.score, total: result.total },
+      update: { answers, score: result.score, total: result.total },
+    }),
+    prisma.workSimulationRun.update({ where: { id: run.id }, data: { lastActiveAt: new Date() } }),
+  ]);
+  return simulationDetail(candidateId, slug);
+}
+
+/** A check the student has answered at least once, for showing answers or sending a try. */
+async function answeredCheck(candidateId: string, slug: string, taskId: string, pageId: string) {
+  const { row, run } = await runFor(candidateId, slug);
+  if (!row.tasks.some((t) => t.id === taskId)) throw notFound('No such task.');
+  const answer = await prisma.workSimulationCheckAnswer.findUnique({
     where: { runId_taskId_pageId: { runId: run.id, taskId, pageId } },
-    create: { runId: run.id, taskId, pageId, answers, score: result.score, total: result.total },
-    update: { answers, score: result.score, total: result.total },
+    select: { id: true, revealedAt: true },
   });
-  await prisma.workSimulationRun.update({ where: { id: run.id }, data: { lastActiveAt: new Date() } });
+  if (!answer) throw badRequest('Take the test first.');
+  return { run, answer };
+}
+
+/**
+ * Shows the right answers and the company's explanations. It ends the tries
+ * at this test - with the answers in front of them, another try would prove
+ * nothing.
+ */
+export async function revealCheck(candidateId: string, slug: string, taskId: string, pageId: string) {
+  const { answer } = await answeredCheck(candidateId, slug, taskId, pageId);
+  if (!answer.revealedAt) {
+    await prisma.workSimulationCheckAnswer.update({ where: { id: answer.id }, data: { revealedAt: new Date() } });
+  }
+  return simulationDetail(candidateId, slug);
+}
+
+/**
+ * Sends one try at a test to the company behind the simulation, which reads
+ * it in its Work tab with every answer. The student chooses which try; each
+ * is sent once and stays sent.
+ */
+export async function sendCheck(candidateId: string, slug: string, taskId: string, pageId: string, number: number) {
+  const { run } = await answeredCheck(candidateId, slug, taskId, pageId);
+  const attempt = await prisma.workSimulationCheckAttempt.findUnique({
+    where: { runId_taskId_pageId_number: { runId: run.id, taskId, pageId, number } },
+    select: { id: true, sentAt: true },
+  });
+  if (!attempt) throw notFound('No such try.');
+  if (!attempt.sentAt) {
+    await prisma.workSimulationCheckAttempt.update({ where: { id: attempt.id }, data: { sentAt: new Date() } });
+  }
   return simulationDetail(candidateId, slug);
 }
 
@@ -816,6 +905,7 @@ export async function reviewQueue() {
       explainChange: true,
       candidate: {
         select: {
+          id: true,
           otherCollege: true,
           college: { select: { name: true } },
           listing: { select: { name: true } },
@@ -844,6 +934,7 @@ export async function reviewQueue() {
       companyId: r.simulation.company.id,
       submittedAt: r.submittedAt,
       student: {
+        id: r.candidate.id,
         name: r.candidate.user.fullName,
         email: r.candidate.user.email,
         college: r.candidate.college?.name ?? r.candidate.listing?.name ?? r.candidate.otherCollege ?? null,

@@ -5,6 +5,8 @@ import { badRequest } from '../../lib/errors.js';
 import { imageUpload } from '../../lib/upload.js';
 import { saveTenantAsset } from '../tenants/assets.js';
 import { handInKindsSchema, pagesSchema } from './pages.js';
+import { simulationAnalytics } from './analytics.js';
+import { companyOffers, offerSchema, sendOffer, withdrawOffer } from './offers.js';
 import { requireCompanyId, requireRole } from '../../middleware/auth.js';
 import { requirePlatform } from '../tenants/tenant.context.js';
 import {
@@ -17,6 +19,7 @@ import {
   listSimulations,
   overview,
   retireSimulation,
+  sentTests,
   sharedWithCompany,
   simulationsToCheck,
   submitSimulation,
@@ -138,6 +141,14 @@ companyAppRouter.get(
   }),
 );
 
+/** GET /api/company-app/simulations/:id/analytics - who takes it, how far they get, how they do. */
+companyAppRouter.get(
+  '/simulations/:id/analytics',
+  asyncHandler(async (req, res) => {
+    res.json(await simulationAnalytics(requireCompanyId(req), id.parse(req.params.id)));
+  }),
+);
+
 /** PUT /api/company-app/simulations/:id */
 companyAppRouter.put(
   '/simulations/:id',
@@ -198,6 +209,39 @@ companyAppRouter.get(
   '/shared',
   asyncHandler(async (req, res) => {
     res.json({ shared: await sharedWithCompany(requireCompanyId(req)) });
+  }),
+);
+
+/** GET /api/company-app/offers - every internship offer the company has made. */
+companyAppRouter.get(
+  '/offers',
+  asyncHandler(async (req, res) => {
+    res.json({ offers: await companyOffers(requireCompanyId(req)) });
+  }),
+);
+
+/** POST /api/company-app/offers - offer a student who has shown the company their work an internship. */
+companyAppRouter.post(
+  '/offers',
+  asyncHandler(async (req, res) => {
+    const body = offerSchema.parse(req.body);
+    res.status(201).json({ offers: await sendOffer(requireCompanyId(req), req.session.userId!, body) });
+  }),
+);
+
+/** POST /api/company-app/offers/:id/withdraw */
+companyAppRouter.post(
+  '/offers/:id/withdraw',
+  asyncHandler(async (req, res) => {
+    res.json({ offers: await withdrawOffer(requireCompanyId(req), id.parse(req.params.id)) });
+  }),
+);
+
+/** GET /api/company-app/tests - test results students sent to this company. */
+companyAppRouter.get(
+  '/tests',
+  asyncHandler(async (req, res) => {
+    res.json({ tests: await sentTests(requireCompanyId(req)) });
   }),
 );
 

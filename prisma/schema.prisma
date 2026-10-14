@@ -156,6 +156,7 @@ model User {
   invitesToClaim    Invite[]               @relation("InviteAccount")
   companiesReviewed Company[]              @relation("CompanyReviewer")
   companyPosts      CompanyPost[]          @relation("CompanyPostAuthor")
+  interviewProcesses InterviewProcess[]    @relation("InterviewProcessCreator")
   assessmentsSet    Assessment[]           @relation("AssessmentAuthor")
   assessmentsMarked AssessmentAssignment[] @relation("AssessmentReviewer")
   posts             Post[]                 @relation("PostAuthor")
@@ -167,6 +168,7 @@ model User {
   jobTeams        JobTeamMember[] @relation("JobTeam")
   authoredNotices Notice[]        @relation("NoticeAuthor")
   programAliases  ProgramAlias[]
+  offersSent      InternshipOffer[] @relation("OfferSender")
 
   @@index([role])
 }
@@ -667,15 +669,18 @@ model Company {
   invites     Invite[]
   jobOptions  JobOption[]
 
-  simulations     Simulation[]
-  showcaseInvites ShowcaseInvite[]
-  posts           CompanyPost[]
-  campusDrives    CampusDrive[]
+  simulations          Simulation[]
+  showcaseInvites      ShowcaseInvite[]
+  posts                CompanyPost[]
+  campusDrives         CampusDrive[]
+  workSimulations      WorkSimulation[]
+  workSimulationShares WorkSimulationShare[]
+  internshipOffers     InternshipOffer[]
+  interviewProcesses   InterviewProcess[]
+  interviewInvites     InterviewInvite[]
 
   @@index([status])
   @@index([industryId])
-  workSimulations WorkSimulation[]
-  workSimulationShares WorkSimulationShare[]
 }
 
 /// An update on a company's page: a hire, a product, a campus visit.
@@ -818,15 +823,15 @@ enum StudyLevel {
 }
 
 model Course {
-  id        String   @id @default(cuid())
-  name      String   @unique
+  id        String      @id @default(cuid())
+  name      String      @unique
   /// Diploma, undergraduate, postgraduate or PhD. At sign-up the student picks
   /// a level and is offered that level's courses.
   level     StudyLevel?
   /// How long it runs, in years: what turns a joining year into a batch.
   years     Int?
-  isActive  Boolean  @default(true)
-  createdAt DateTime @default(now())
+  isActive  Boolean     @default(true)
+  createdAt DateTime    @default(now())
 
   specialisations Specialisation[]
   tenantPrograms  TenantProgram[]
@@ -1066,6 +1071,8 @@ model Candidate {
   simulationEnrolments SimulationEnrolment[]
   workSimulationRuns   WorkSimulationRun[]
   dashboardDismissals  DashboardDismissal[]
+  internshipOffers     InternshipOffer[]
+  interviewInvites     InterviewInvite[]
   stories              CampusStory[]
   showcase             ShowcaseProfile?
   showcaseInvites      ShowcaseInvite[]
@@ -1879,6 +1886,95 @@ model RoundResult {
 
   @@unique([applicationId, roundId])
   @@index([applicationId])
+}
+
+/// A named, reusable interview pipeline a company builds once and uses across
+/// drives and openings. It is independent of any specific job: the company
+/// decides what rounds a candidate goes through, in what order, and can then
+/// attach this process to any role they post.
+model InterviewProcess {
+  id          String               @id @default(cuid())
+  companyId   String
+  createdById String
+  title       String
+  description String?              @db.Text
+  processType String               @default("HIRING")
+  status      String               @default("DRAFT")
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
+
+  company   Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy User                   @relation("InterviewProcessCreator", fields: [createdById], references: [id])
+  rounds    InterviewProcessRound[]
+
+  @@index([companyId])
+}
+
+/// One round inside a company's reusable interview process.
+model InterviewProcessRound {
+  id                String  @id @default(cuid())
+  processId         String
+  order             Int
+  name              String
+  type              String  @default("RESUME_SCREEN")
+  isElimination     Boolean @default(false)
+  description       String? @db.Text
+  isOnline          Boolean @default(false)
+  meetingLink       String? @db.Text
+  addressLine       String? @db.Text
+  shortlistCount    Int?
+  durationMin       Int?
+  mode              String?
+
+  process InterviewProcess @relation(fields: [processId], references: [id], onDelete: Cascade)
+
+  @@unique([processId, order])
+  @@index([processId])
+}
+
+/// A direct interview invite a company sends to a student based on their
+/// shared simulation work. Tracks which round the candidate is on and
+/// collects round-by-round feedback from the company.
+model InterviewInvite {
+  id                String    @id @default(cuid())
+  companyId         String
+  candidateId       String
+  processId         String
+  sentById          String
+  role              String
+  message           String?   @db.Text
+  status            String    @default("PENDING")
+  currentRoundOrder Int       @default(1)
+  respondedAt       DateTime?
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  company        Company                  @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  candidate      Candidate                @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  process        InterviewProcess         @relation(fields: [processId], references: [id], onDelete: Cascade)
+  sentBy         User                     @relation("InterviewInviteSender", fields: [sentById], references: [id])
+  roundFeedbacks InterviewRoundFeedback[]
+
+  @@index([companyId])
+  @@index([candidateId])
+}
+
+/// Feedback recorded by the company for one round of an interview invite.
+model InterviewRoundFeedback {
+  id          String   @id @default(cuid())
+  inviteId    String
+  roundOrder  Int
+  roundName   String
+  outcome     String   @default("PENDING")
+  score       Decimal? @db.Decimal(5, 2)
+  notes       String?  @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  invite InterviewInvite @relation(fields: [inviteId], references: [id], onDelete: Cascade)
+
+  @@unique([inviteId, roundOrder])
+  @@index([inviteId])
 }
 
 /// Append-only audit trail. Never updated, never deleted.
@@ -3376,39 +3472,39 @@ enum RunStatus {
 
 /// One work simulation: a handful of tasks set by a company's team.
 model WorkSimulation {
-  id          String           @id @default(cuid())
+  id          String               @id @default(cuid())
   /// The address students see: /student/simulations/<slug>.
-  slug        String           @unique
+  slug        String               @unique
   companyId   String
   title       String
   /// Two or three sentences: the card, and the top of the page.
-  summary     String           @db.Text
+  summary     String               @db.Text
   /// The longer story, in the company's words: why this work matters to them
   /// and what a student will get from trying it.
-  about       String?          @db.Text
+  about       String?              @db.Text
   /// A wide picture for the card and the top of the page.
-  coverUrl    String?          @db.VarChar(500)
+  coverUrl    String?              @db.VarChar(500)
   /// A short introduction from the team, as a YouTube or Vimeo link.
-  videoUrl    String?          @db.VarChar(500)
+  videoUrl    String?              @db.VarChar(500)
   /// The career interest it belongs to - one of the platform's list - so it
   /// can be suggested to students who picked that field.
   field       String
   level       WorkSimulationLevel  @default(BEGINNER)
   /// Roughly how long the whole thing takes.
-  hours       Int              @default(4)
+  hours       Int                  @default(4)
   /// ["Excel", "Forecasting"]
-  skills      Json             @default("[]")
+  skills      Json                 @default("[]")
   status      WorkSimulationStatus @default(DRAFT)
   publishedAt DateTime?
   /// When the company last sent it to be checked, and what Apli.ai said.
   submittedAt DateTime?
   reviewedAt  DateTime?
-  reviewNote  String?          @db.Text
+  reviewNote  String?              @db.Text
   createdById String?
-  createdAt   DateTime         @default(now())
-  updatedAt   DateTime         @updatedAt
+  createdAt   DateTime             @default(now())
+  updatedAt   DateTime             @updatedAt
 
-  company Company       @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  company Company              @relation(fields: [companyId], references: [id], onDelete: Cascade)
   tasks   WorkSimulationTask[]
   runs    WorkSimulationRun[]
 
@@ -3416,7 +3512,7 @@ model WorkSimulation {
 }
 
 model WorkSimulationTask {
-  id           String @id @default(cuid())
+  id           String  @id @default(cuid())
   simulationId String
   position     Int
   title        String
@@ -3435,9 +3531,10 @@ model WorkSimulationTask {
   handInKinds  Json    @default("[\"text\",\"link\",\"file\"]")
   minutes      Int     @default(45)
 
-  simulation WorkSimulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  simulation WorkSimulation               @relation(fields: [simulationId], references: [id], onDelete: Cascade)
   done       WorkSimulationTaskDone[]
   checks     WorkSimulationCheckAnswer[]
+  attempts   WorkSimulationCheckAttempt[]
 
   @@unique([simulationId, position])
 }
@@ -3458,20 +3555,22 @@ model WorkSimulationRun {
   /// "Explain your work", in the student's words, after the last task: how
   /// they went about it and what they would do differently. A reviewer reads
   /// it beside the work - it is what stops copied work passing.
-  explainHow      String?   @db.Text
-  explainChange   String?   @db.Text
-  submittedAt     DateTime?
-  reviewedAt      DateTime?
-  reviewedById    String?
+  explainHow    String?   @db.Text
+  explainChange String?   @db.Text
+  submittedAt   DateTime?
+  reviewedAt    DateTime?
+  reviewedById  String?
   /// What the reviewer said - the reason, when they asked for changes.
-  reviewNote      String?   @db.Text
+  reviewNote    String?   @db.Text
 
-  simulation WorkSimulation @relation(fields: [simulationId], references: [id], onDelete: Cascade)
-  candidate  Candidate         @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  simulation WorkSimulation               @relation(fields: [simulationId], references: [id], onDelete: Cascade)
+  candidate  Candidate                    @relation(fields: [candidateId], references: [id], onDelete: Cascade)
   done       WorkSimulationTaskDone[]
   shares     WorkSimulationShare[]
   review     WorkSimulationReview?
   checks     WorkSimulationCheckAnswer[]
+  attempts   WorkSimulationCheckAttempt[]
+  offers     InternshipOffer[]
 
   @@unique([simulationId, candidateId])
   @@index([candidateId, status])
@@ -3479,9 +3578,9 @@ model WorkSimulationRun {
 
 /// A task handed in: what the student wrote, a link to what they made, a file, or any of them.
 model WorkSimulationTaskDone {
-  id     String   @id @default(cuid())
-  runId  String
-  taskId String
+  id       String   @id @default(cuid())
+  runId    String
+  taskId   String
   answer   String?  @db.Text
   link     String?  @db.VarChar(500)
   /// A file they uploaded - a PDF or a picture - and the name it had on their machine.
@@ -3512,21 +3611,46 @@ model WorkSimulationReview {
 /// A student's answers to one quick check in a task, marked by the server.
 /// Answering again replaces it; the latest is what a reviewer sees.
 model WorkSimulationCheckAnswer {
-  id        String   @id @default(cuid())
-  runId     String
-  taskId    String
+  id         String    @id @default(cuid())
+  runId      String
+  taskId     String
   /// The page's id inside the task's `pages`.
-  pageId    String   @db.VarChar(40)
-  answers   Json
-  score     Int
-  total     Int
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  pageId     String    @db.VarChar(40)
+  answers    Json
+  score      Int
+  total      Int
+  /// When the student chose to see the right answers. No more tries after that.
+  revealedAt DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
 
   run  WorkSimulationRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
   task WorkSimulationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
 
   @@unique([runId, taskId, pageId])
+}
+
+/// Every try at a quick check, kept. The latest is the one that counts
+/// (WorkSimulationCheckAnswer); any of them can be sent to the company.
+model WorkSimulationCheckAttempt {
+  id        String    @id @default(cuid())
+  runId     String
+  taskId    String
+  pageId    String    @db.VarChar(40)
+  /// 1 for the first try, then 2, 3...
+  number    Int
+  answers   Json
+  score     Int
+  total     Int
+  /// When the student sent this try to the simulation's company.
+  sentAt    DateTime?
+  createdAt DateTime  @default(now())
+
+  run  WorkSimulationRun  @relation(fields: [runId], references: [id], onDelete: Cascade)
+  task WorkSimulationTask @relation(fields: [taskId], references: [id], onDelete: Cascade)
+
+  @@unique([runId, taskId, pageId, number])
+  @@index([sentAt])
 }
 
 /// A company a student chose to let see one finished, verified simulation.
@@ -3555,4 +3679,55 @@ model DashboardDismissal {
   candidate Candidate @relation(fields: [candidateId], references: [id], onDelete: Cascade)
 
   @@unique([candidateId, kind, refId])
+}
+
+enum InternshipOfferStatus {
+  SENT
+  ACCEPTED
+  DECLINED
+  WITHDRAWN
+}
+
+/// An internship a company offers one student - usually on the strength of
+/// their work on its simulation. Only a student who has shown the company
+/// their work can be offered one. Past its reply-by date, an offer still
+/// SENT has lapsed.
+model InternshipOffer {
+  id          String  @id @default(cuid())
+  companyId   String
+  candidateId String
+  /// The simulation work that led to it, when there was one.
+  runId       String?
+  sentById    String
+
+  role     String  @db.VarChar(120)
+  /// What the intern will do, in the company's words.
+  about    String  @db.Text
+  /// REMOTE, OFFICE or HYBRID.
+  workMode String  @db.VarChar(10)
+  city     String? @db.VarChar(80)
+  months   Int
+  startsOn DateTime? @db.Date
+  /// Rupees a month; null when it is unpaid.
+  stipend  Int?
+  respondBy DateTime @db.Date
+  /// When the company promised the student pays nothing to take it.
+  noFeeAt   DateTime
+
+  status      InternshipOfferStatus @default(SENT)
+  respondedAt DateTime?
+  /// What the student said with their answer.
+  studentNote String?               @db.VarChar(500)
+  createdAt   DateTime              @default(now())
+  updatedAt   DateTime              @updatedAt
+
+  company   Company            @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  candidate Candidate          @relation(fields: [candidateId], references: [id], onDelete: Cascade)
+  run       WorkSimulationRun? @relation(fields: [runId], references: [id], onDelete: SetNull)
+  sentBy    User               @relation("OfferSender", fields: [sentById], references: [id], onDelete: Cascade)
+
+  @@index([candidateId, status])
+  @@index([companyId, status])
+  @@index([runId])
+  @@index([sentById])
 }

@@ -266,6 +266,64 @@ export function writtenAnswers(page: CheckPage, answers: Answers): { prompt: str
     .map((q) => ({ prompt: q.prompt, answer: typeof answers[q.id] === 'string' ? (answers[q.id] as string) : '' }));
 }
 
+/**
+ * One marked try as the student sees it before choosing to see the answers:
+ * right or not for each question, but not what the right answer is, nor the
+ * company's explanation. Afterwards, everything.
+ */
+export function asShown(marked: Marked, revealed: boolean): Marked {
+  if (revealed) return marked;
+  return {
+    ...marked,
+    questions: Object.fromEntries(
+      Object.entries(marked.questions).map(([id, q]) => [id, { correct: q.correct, solution: [], explain: null }]),
+    ),
+  };
+}
+
+/**
+ * A try written out in words, for the company reading it: each question, what
+ * the student answered, the right answer, and whether they had it.
+ */
+export function inWords(page: CheckPage, answers: Answers) {
+  const { questions } = mark(page, answers);
+  return page.questions.map((q) => {
+    const raw = answers[q.id];
+    const given = Array.isArray(raw) ? raw : [];
+    const correct = questions[q.id]?.correct ?? null;
+    if (q.kind === 'text') {
+      return { prompt: q.prompt, kind: q.kind, answer: [typeof raw === 'string' ? raw : ''], right: [] as string[], correct };
+    }
+    if (q.kind === 'choice') {
+      return {
+        prompt: q.prompt,
+        kind: q.kind,
+        answer: given.map((i) => q.options[i] ?? '?'),
+        right: q.correct.map((i) => q.options[i]!),
+        correct,
+      };
+    }
+    if (q.kind === 'sort') {
+      return {
+        prompt: q.prompt,
+        kind: q.kind,
+        answer: q.items.map((it, i) => `${it.text} → ${q.groups[given[i] ?? -1] ?? 'not placed'}`),
+        right: q.items.map((it) => `${it.text} → ${q.groups[it.group]}`),
+        correct,
+      };
+    }
+    // Order: the student's answer is shown positions; map them back to the items.
+    const shown = shownOrder(q.id, q.items.length);
+    return {
+      prompt: q.prompt,
+      kind: q.kind,
+      answer: given.map((k) => q.items[shown[k] ?? -1] ?? '?'),
+      right: q.items,
+      correct,
+    };
+  });
+}
+
 /** The ways a task can be handed in. */
 export const HAND_IN_KINDS = ['text', 'link', 'file'] as const;
 export type HandInKind = (typeof HAND_IN_KINDS)[number];

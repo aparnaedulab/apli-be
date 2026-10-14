@@ -9,18 +9,30 @@ import {
   deleteSimulation,
   overview,
   retireSimulation,
+  sentTests,
   sharedWithCompany,
   simulationsToCheck,
   submitSimulation,
   updateSimulation,
   withdrawSimulation,
 } from '../src/modules/companyApp/companyApp.service.js';
+import { simulationAnalytics } from '../src/modules/companyApp/analytics.js';
+import {
+  companyOffers,
+  myOffers,
+  offerSchema,
+  respondToOffer,
+  sendOffer,
+  withdrawOffer,
+} from '../src/modules/companyApp/offers.js';
 import {
   answerCheck,
   dashboard,
   explainWork,
   listSimulations,
+  revealCheck,
   saveReview,
+  sendCheck,
   setShares,
   simulationDetail,
   simulationReviews,
@@ -217,11 +229,38 @@ describe('pages and quick checks inside a task', () => {
 
     const qs = (page.tasks[0]!.pages[1] as { questions: { id: string }[] }).questions;
     const first = await answerCheck(me.id, sim.slug, taskId, pageId, { [qs[0]!.id]: [0], [qs[1]!.id]: [0, 1] });
-    expect(first.tasks[0]!.checks[pageId]).toMatchObject({ score: 1, total: 2 });
-    expect(first.tasks[0]!.checks[pageId]!.questions[qs[0]!.id]).toEqual({ correct: false, solution: [1], explain: 'Margin is what is left.' });
+    expect(first.tasks[0]!.checks[pageId]).toMatchObject({ score: 1, total: 2, revealed: false, tries: [{ number: 1, score: 1 }] });
+    // Right or not, but not the right answer, until they ask to see it.
+    expect(first.tasks[0]!.checks[pageId]!.questions[qs[0]!.id]).toEqual({ correct: false, solution: [], explain: null });
 
     const again = await answerCheck(me.id, sim.slug, taskId, pageId, { [qs[0]!.id]: [1], [qs[1]!.id]: [0, 1] });
     expect(again.tasks[0]!.checks[pageId]).toMatchObject({ score: 2, total: 2 });
+    expect(again.tasks[0]!.checks[pageId]!.tries.map((t) => [t.number, t.score])).toEqual([
+      [1, 1],
+      [2, 2],
+    ]);
+
+    // Sending a try: the company reads it, with which try it was and every answer.
+    expect(await sentTests(company.id)).toEqual([]);
+    const sentOne = await sendCheck(me.id, sim.slug, taskId, pageId, 1);
+    expect(sentOne.tasks[0]!.checks[pageId]!.tries[0]!.sentAt).not.toBeNull();
+    await expect(sendCheck(me.id, sim.slug, taskId, pageId, 9)).rejects.toThrow('No such try');
+    const inbox = await sentTests(company.id);
+    expect(inbox).toHaveLength(1);
+    expect(inbox[0]).toMatchObject({ attempt: 1, tries: 2, score: 1, total: 2, test: 'Quick check' });
+    expect(inbox[0]!.questions[0]).toMatchObject({ correct: false, answer: [expect.any(String)], right: [expect.any(String)] });
+    expect(inbox[0]!.questions[1]).toMatchObject({ kind: 'sort', correct: true });
+    // Another company sees nothing of it.
+    const other = await liveCompany('Sample Elsewhere Co');
+    expect(await sentTests(other.company.id)).toEqual([]);
+
+    // Seeing the answers shows them, and closes the test.
+    const shown = await revealCheck(me.id, sim.slug, taskId, pageId);
+    expect(shown.tasks[0]!.checks[pageId]).toMatchObject({ revealed: true });
+    expect(shown.tasks[0]!.checks[pageId]!.questions[qs[0]!.id]).toEqual({ correct: true, solution: [1], explain: 'Margin is what is left.' });
+    await expect(answerCheck(me.id, sim.slug, taskId, pageId, { [qs[0]!.id]: [1], [qs[1]!.id]: [0, 1] })).rejects.toThrow(
+      'cannot be taken again',
+    );
 
     // A later task cannot be answered out of order; this one can now be handed in.
     await expect(answerCheck(me.id, sim.slug, page.tasks[1]!.id, pageId, {})).rejects.toThrow('in order');
@@ -317,5 +356,159 @@ describe("students' work, reviewed by the company", () => {
     expect(shared[0]).toMatchObject({ student: { name: 'Sample Person', city: 'Pune' }, simulation: { title: DRAFT.title } });
     expect(shared[0]!.tasks.map((t) => t.answer)).toEqual(['Answer for Read the sales', 'Answer for Recommend a price']);
     expect((await overview(company.id)).students.sharedWithYou).toBe(1);
+  });
+});
+
+describe('analytics for the company', () => {
+  it('counts everyone, and names only students who handed in or sent a test', async () => {
+    const company = await makeCompany('Sample Counted Co', true);
+    const author = await user('COMPANY');
+    const made = await createSimulation(company.id, author.id, {
+      ...DRAFT,
+      tasks: [
+        {
+          ...DRAFT.tasks[0]!,
+          pages: [
+            {
+              kind: 'check',
+              title: 'Quick check',
+              questions: [{ kind: 'choice', prompt: 'Which is the margin?', options: ['Price', 'Price less cost'], correct: [1] }],
+            },
+          ],
+        },
+        DRAFT.tasks[1]!,
+      ],
+    });
+    await submitSimulation(company.id, made.id);
+    await checkSimulation(made.id, { decision: 'approve' });
+
+    const [handsIn, sends, browses] = [await student(), await student(), await student()];
+    const page = await startSimulation(handsIn.id, made.slug);
+    await startSimulation(sends.id, made.slug);
+    await startSimulation(browses.id, made.slug);
+    const [t1, t2] = page.tasks;
+    const check = t1!.pages.find((p) => p.kind === 'check') as { id: string; questions: { id: string }[] };
+    const q = check.questions[0]!.id;
+
+    // One gets it wrong, then right, and hands everything in.
+    await answerCheck(handsIn.id, made.slug, t1!.id, check.id, { [q]: [0] });
+    await answerCheck(handsIn.id, made.slug, t1!.id, check.id, { [q]: [1] });
+    await submitTask(handsIn.id, made.slug, t1!.id, { answer: 'Done.' });
+    await submitTask(handsIn.id, made.slug, t2!.id, { answer: 'Done.' });
+    await explainWork(handsIn.id, made.slug, {
+      how: 'I worked out the margins first and then compared each price with its cost.',
+      change: 'I would check last year as well.',
+    });
+    // One gets it wrong once and sends that try.
+    await answerCheck(sends.id, made.slug, t1!.id, check.id, { [q]: [0] });
+    await sendCheck(sends.id, made.slug, t1!.id, check.id, 1);
+
+    const a = await simulationAnalytics(company.id, made.id);
+    expect(a.status).toMatchObject({ started: 3, working: 2, toReview: 1, verified: 0, completionRate: 0 });
+    expect(a.who.cities.rows).toEqual([{ label: 'Pune', count: 3 }]);
+    expect(a.weeks).toHaveLength(12);
+    expect(a.weeks.at(-1)!.started).toBe(3);
+    expect(a.tasks.map((t) => [t.reached, t.handedIn])).toEqual([
+      [3, 1],
+      [1, 1],
+    ]);
+    expect(a.tasks[0]!.tests[0]).toMatchObject({ takers: 2, firstTry: 0, latest: 50, averageTries: 1.5, sent: 1 });
+    expect(a.tasks[0]!.tests[0]!.questions[0]!.firstTryRight).toBe(0);
+
+    // Two by name; the one who only browsed is a number.
+    expect(a.anonymous).toBe(1);
+    expect(a.students.map((s) => s.why).sort()).toEqual(['handed-in', 'sent-a-test']);
+    const full = a.students.find((s) => s.why === 'handed-in')!;
+    expect(full.tasks[0]!.tests[0]).toMatchObject({ tries: 2, latest: { score: 1, total: 1 }, answers: { number: 2 } });
+    const sentOnly = a.students.find((s) => s.why === 'sent-a-test')!;
+    expect(sentOnly.tasks[0]!.tests[0]).toMatchObject({ tries: 1, latest: null, visible: [{ number: 1, sent: true }] });
+
+    // Another company cannot read it.
+    const other = await makeCompany('Sample Nosy Co', true);
+    await expect(simulationAnalytics(other.id, made.id)).rejects.toThrow('No such simulation');
+  });
+});
+
+describe('internship offers', () => {
+  const soon = (days: number) => new Date(Date.now() + days * 86_400_000).toISOString().slice(0, 10);
+  const offer = (candidateId: string, extra: Record<string, unknown> = {}) =>
+    offerSchema.parse({
+      candidateId,
+      role: 'Finance intern',
+      about: 'Help close the books each month and write the note to the owner, alongside our team.',
+      workMode: 'HYBRID',
+      city: 'Pune',
+      months: 3,
+      stipend: 15000,
+      respondBy: soon(7),
+      startsOn: soon(30),
+      noFee: true,
+      ...extra,
+    });
+
+  it('goes only to students who showed their work, and is answered once', async () => {
+    const { company, sim, author } = await liveCompany('Sample Hiring Co');
+    const shows = await student();
+    const quiet = await student();
+    const started = await startSimulation(shows.id, sim.slug);
+    await startSimulation(quiet.id, sim.slug);
+
+    // The form insists on the essentials.
+    expect(() => offer(shows.id, { noFee: false })).toThrow('pays nothing');
+    expect(() => offer(shows.id, { workMode: 'OFFICE', city: '' })).toThrow('which city');
+    expect(() => offer(shows.id, { respondBy: '2020-01-01' })).toThrow('today or later');
+
+    // Not before they have shown the company anything.
+    await expect(sendOffer(company.id, author.id, offer(shows.id))).rejects.toThrow('shown you their work');
+    for (const t of started.tasks) await submitTask(shows.id, sim.slug, t.id, { answer: 'Done.' });
+    await explainWork(shows.id, sim.slug, {
+      how: 'I read the sales first, then worked out each margin before picking an item.',
+      change: 'I would compare prices with the shop next door.',
+    });
+    await expect(sendOffer(company.id, author.id, offer(quiet.id))).rejects.toThrow('shown you their work');
+
+    const sent = await sendOffer(company.id, author.id, { ...offer(shows.id), runId: started.run!.id });
+    expect(sent[0]).toMatchObject({ role: 'Finance intern', status: 'SENT', simulation: { title: DRAFT.title } });
+    await expect(sendOffer(company.id, author.id, offer(shows.id))).rejects.toThrow('already has an offer');
+
+    // The student sees it, without the contact until they say yes.
+    const mine = await myOffers(shows.id);
+    expect(mine).toHaveLength(1);
+    expect(mine[0]).toMatchObject({ status: 'SENT', stipend: 15000, contact: null, company: { name: 'Sample Hiring Co' } });
+    const answered = await respondToOffer(shows.id, mine[0]!.id, { decision: 'accept', note: 'Thank you!' });
+    expect(answered[0]).toMatchObject({ status: 'ACCEPTED', studentNote: 'Thank you!', contact: { email: expect.any(String) } });
+    await expect(respondToOffer(shows.id, mine[0]!.id, { decision: 'decline' })).rejects.toThrow('already answered');
+    await expect(withdrawOffer(company.id, mine[0]!.id)).rejects.toThrow('waiting for an answer');
+    expect((await companyOffers(company.id))[0]).toMatchObject({ status: 'ACCEPTED', student: { id: shows.id } });
+
+    // Another company cannot answer for it, nor see it.
+    const other = await liveCompany('Sample Other Hirer');
+    await expect(withdrawOffer(other.company.id, mine[0]!.id)).rejects.toThrow('No such offer');
+    expect(await companyOffers(other.company.id)).toEqual([]);
+  });
+
+  it('can be withdrawn while waiting, lapses after its date, and needs a verified company', async () => {
+    const { company, sim, author } = await liveCompany('Sample Careful Co');
+    const me = await student();
+    const started = await startSimulation(me.id, sim.slug);
+    for (const t of started.tasks) await submitTask(me.id, sim.slug, t.id, { answer: 'Done.' });
+    await explainWork(me.id, sim.slug, {
+      how: 'I matched sales to prices first, then worked out each margin carefully.',
+      change: 'I would look at a second month too.',
+    });
+
+    const [first] = await sendOffer(company.id, author.id, offer(me.id));
+    await withdrawOffer(company.id, first!.id);
+    // Withdrawn offers disappear for the student.
+    expect(await myOffers(me.id)).toEqual([]);
+
+    // Past its date, it has lapsed and cannot be accepted.
+    const [second] = await sendOffer(company.id, author.id, offer(me.id));
+    await db.internshipOffer.update({ where: { id: second!.id }, data: { respondBy: new Date('2020-01-01') } });
+    expect((await myOffers(me.id))[0]!.status).toBe('LAPSED');
+    await expect(respondToOffer(me.id, second!.id, { decision: 'accept' })).rejects.toThrow('reply-by date');
+
+    const pending = await makeCompany('Sample Unverified Hirer', false);
+    await expect(sendOffer(pending.id, author.id, offer(me.id))).rejects.toThrow('not verified');
   });
 });

@@ -9,6 +9,7 @@ import { ASSET_ROUTE, saveTenantAsset, sniffDocument, sniffImage } from '../tena
 import { requirePlatform } from '../tenants/tenant.context.js';
 import { activeInterests } from '../students/lists.js';
 import { answersSchema } from '../companyApp/pages.js';
+import { myOffers, respondSchema, respondToOffer } from '../companyApp/offers.js';
 import {
   answerCheck,
   dashboard,
@@ -16,10 +17,12 @@ import {
   explainWork,
   listSimulations,
   profile,
+  revealCheck,
   review,
   reviewQueue,
   saveProfile,
   saveReview,
+  sendCheck,
   simulationReviews,
   setShares,
   shareOptions,
@@ -170,6 +173,23 @@ studentAppRouter.post(
   }),
 );
 
+/** POST /api/student-app/simulations/:slug/tasks/:taskId/checks/:pageId/reveal - shows the answers; no more tries. */
+studentAppRouter.post(
+  '/simulations/:slug/tasks/:taskId/checks/:pageId/reveal',
+  asyncHandler(async (req, res) => {
+    res.json(await revealCheck(requireCandidateId(req), req.params.slug!, req.params.taskId!, req.params.pageId!));
+  }),
+);
+
+/** POST /api/student-app/simulations/:slug/tasks/:taskId/checks/:pageId/send  { attempt } - to the simulation's company. */
+studentAppRouter.post(
+  '/simulations/:slug/tasks/:taskId/checks/:pageId/send',
+  asyncHandler(async (req, res) => {
+    const { attempt } = z.object({ attempt: z.number().int().min(1).max(10000) }).parse(req.body);
+    res.json(await sendCheck(requireCandidateId(req), req.params.slug!, req.params.taskId!, req.params.pageId!, attempt));
+  }),
+);
+
 /** POST /api/student-app/simulations/:slug/explain  { how, change } */
 studentAppRouter.post(
   '/simulations/:slug/explain',
@@ -192,6 +212,23 @@ studentAppRouter.put(
   asyncHandler(async (req, res) => {
     const { companyIds } = z.object({ companyIds: z.array(id).max(100) }).parse(req.body);
     res.json(await setShares(requireCandidateId(req), id.parse(req.params.runId), companyIds));
+  }),
+);
+
+/** GET /api/student-app/offers - internship offers made to the student. */
+studentAppRouter.get(
+  '/offers',
+  asyncHandler(async (req, res) => {
+    res.json({ offers: await myOffers(requireCandidateId(req)) });
+  }),
+);
+
+/** POST /api/student-app/offers/:offerId/respond  { decision, note? } */
+studentAppRouter.post(
+  '/offers/:offerId/respond',
+  asyncHandler(async (req, res) => {
+    const body = respondSchema.parse(req.body);
+    res.json({ offers: await respondToOffer(requireCandidateId(req), id.parse(req.params.offerId), body) });
   }),
 );
 

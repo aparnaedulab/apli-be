@@ -4,7 +4,7 @@ import { badRequest, conflict, forbidden, notFound } from '../../lib/errors.js';
 import { activeInterests } from '../students/lists.js';
 import { review, reviewQueue } from '../studentApp/studentApp.service.js';
 import type { z } from 'zod';
-import { handInKindsSchema, pagesSchema, readHandInKinds, readPages } from './pages.js';
+import { handInKindsSchema, inWords, pagesSchema, readHandInKinds, readPages, type Answers, type CheckPage } from './pages.js';
 
 /**
  * The company app: a company writes work simulations, sends them to Apli.ai
@@ -402,6 +402,91 @@ export async function sharedWithCompany(companyId: string) {
       explainHow: run.explainHow,
       explainChange: run.explainChange,
     };
+  });
+}
+
+/**
+ * Tests students sent to this company from its own simulations, newest
+ * first: who, which test, which try of how many, the score, and every
+ * answer written out beside the right one.
+ */
+export async function sentTests(companyId: string) {
+  const sent = await prisma.workSimulationCheckAttempt.findMany({
+    where: { sentAt: { not: null }, run: { simulation: { companyId } } },
+    orderBy: { sentAt: 'desc' },
+    take: 200,
+    select: {
+      id: true,
+      pageId: true,
+      number: true,
+      answers: true,
+      score: true,
+      total: true,
+      createdAt: true,
+      sentAt: true,
+      task: { select: { id: true, title: true, pages: true } },
+      run: {
+        select: {
+          id: true,
+          simulation: { select: { title: true } },
+          candidate: {
+            select: {
+              id: true,
+              city: true,
+              phone: true,
+              course: true,
+              specialisation: true,
+              startYear: true,
+              graduationYear: true,
+              otherCollege: true,
+              college: { select: { name: true } },
+              listing: { select: { name: true } },
+              user: { select: { fullName: true, email: true } },
+            },
+          },
+        },
+      },
+    },
+  });
+  // How many tries each student has had at each test, to read the score against.
+  const counts = await prisma.workSimulationCheckAttempt.groupBy({
+    by: ['runId', 'taskId', 'pageId'],
+    where: { runId: { in: [...new Set(sent.map((s) => s.run.id))] } },
+    _count: true,
+  });
+  const triesOf = (runId: string, taskId: string, pageId: string) =>
+    counts.find((c) => c.runId === runId && c.taskId === taskId && c.pageId === pageId)?._count ?? 1;
+
+  return sent.flatMap((s) => {
+    const page = readPages(s.task.pages).find((p): p is CheckPage => p.id === s.pageId && p.kind === 'check');
+    if (!page) return [];
+    const c = s.run.candidate;
+    return [
+      {
+        id: s.id,
+        runId: s.run.id,
+        sentAt: s.sentAt!,
+        takenAt: s.createdAt,
+        attempt: s.number,
+        tries: triesOf(s.run.id, s.task.id, s.pageId),
+        score: s.score,
+        total: s.total,
+        simulation: s.run.simulation.title,
+        task: s.task.title,
+        test: page.title,
+        student: {
+          id: c.id,
+          name: c.user.fullName,
+          email: c.user.email,
+          phone: c.phone,
+          city: c.city,
+          college: c.college?.name ?? c.listing?.name ?? c.otherCollege ?? null,
+          course: [c.course, c.specialisation].filter(Boolean).join(' · ') || null,
+          batch: c.startYear && c.graduationYear ? `${c.startYear} – ${c.graduationYear}` : null,
+        },
+        questions: inWords(page, (s.answers ?? {}) as Answers),
+      },
+    ];
   });
 }
 

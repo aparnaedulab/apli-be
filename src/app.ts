@@ -79,6 +79,7 @@ import { intakeRouter } from './modules/students/intake.routes.js';
 import { registerRouter } from './modules/students/register.routes.js';
 import { signupRouter } from './modules/students/signup.routes.js';
 import { companyAppRouter, simulationCheckRouter } from './modules/companyApp/companyApp.routes.js';
+import { interviewProcessRouter } from './modules/companyApp/interviewProcess.routes.js';
 import { simulationReviewRouter, studentAppRouter } from './modules/studentApp/studentApp.routes.js';
 import { listingsRouter } from './modules/students/listings.routes.js';
 import { partnerAdminRouter, partnerPublicRouter } from './modules/partners/partners.routes.js';
@@ -258,6 +259,7 @@ export function createApp(): Express {
   api.use('/company/jobs', jobRouter);
   api.use('/company/applications', applicationRouter);
   api.use('/company/assessments', companyAssessmentRouter);
+  api.use('/company/interview-processes', interviewProcessRouter);
   api.use('/company', companyRouter);
 
   // Feature routers mount here as each milestone lands:
