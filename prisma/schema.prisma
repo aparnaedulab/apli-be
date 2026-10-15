@@ -1926,11 +1926,47 @@ model InterviewProcessRound {
   shortlistCount    Int?
   durationMin       Int?
   mode              String?
+  /// Per-question time limit in seconds for VIDEO_INTERVIEW rounds (default 90s).
+  questionTimeSec   Int?
+  /// Preparation time before recording in seconds for VIDEO_INTERVIEW rounds (default 30s).
+  prepTimeSec       Int?
 
-  process InterviewProcess @relation(fields: [processId], references: [id], onDelete: Cascade)
+  process   InterviewProcess         @relation(fields: [processId], references: [id], onDelete: Cascade)
+  questions VideoInterviewQuestion[]
 
   @@unique([processId, order])
   @@index([processId])
+}
+
+/// A question inside a VIDEO_INTERVIEW round.
+/// The candidate reads the question, gets prepTimeSec to think, then
+/// questionTimeSec to record their answer.
+model VideoInterviewQuestion {
+  id        String @id @default(cuid())
+  roundId   String
+  order     Int
+  text      String @db.VarChar(600)
+  /// hint shown to the candidate before they start recording; optional.
+  hint      String? @db.VarChar(400)
+  /// intro | behavioural | situational | technical | motivation
+  type      String  @default("behavioural")
+
+  round InterviewProcessRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+
+  @@unique([roundId, order])
+  @@index([roundId])
+}
+
+/// A predefined question-pack a company can import into a VIDEO_INTERVIEW
+/// round. Built by the platform team; companies read and clone these.
+model InterviewQuestionPackage {
+  id          String @id @default(cuid())
+  title       String
+  description String? @db.Text
+  role        String  @default("")  /// empty = generic; otherwise role-specific
+  kind        String  @default("VIDEO_INTERVIEW")
+  questions   Json    @default("[]")  /// [{order, text, hint, type}]
+  createdAt   DateTime @default(now())
 }
 
 /// A direct interview invite a company sends to a student based on their
