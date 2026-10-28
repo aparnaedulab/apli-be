@@ -144,30 +144,30 @@ model User {
   createdAt   DateTime  @default(now())
   updatedAt   DateTime  @updatedAt
 
-  candidate         Candidate?
-  campusMember      CampusMember?
-  companyMember     CompanyMember?
-  notifications     Notification[]
-  statusEvents      StatusEvent[]          @relation("StatusEventActor")
-  postingsDecided   JobPosting[]           @relation("PostingDecider")
-  roundResults      RoundResult[]          @relation("RoundEvaluator")
-  jobsCreated       Job[]                  @relation("JobCreator")
-  invitesSent       Invite[]               @relation("InviteSender")
-  invitesToClaim    Invite[]               @relation("InviteAccount")
-  companiesReviewed Company[]              @relation("CompanyReviewer")
-  companyPosts      CompanyPost[]          @relation("CompanyPostAuthor")
-  interviewProcesses InterviewProcess[]    @relation("InterviewProcessCreator")
-  interviewInvitesSent InterviewInvite[]   @relation("InterviewInviteSender")
-  assessmentsSet    Assessment[]           @relation("AssessmentAuthor")
-  assessmentsMarked AssessmentAssignment[] @relation("AssessmentReviewer")
-  posts             Post[]                 @relation("PostAuthor")
-  postComments      PostComment[]          @relation("CommentAuthor")
-  postLikes         PostLike[]             @relation("PostLiker")
-  counselling       CounsellingRequest[]   @relation("Counsellor")
+  candidate            Candidate?
+  campusMember         CampusMember?
+  companyMember        CompanyMember?
+  notifications        Notification[]
+  statusEvents         StatusEvent[]          @relation("StatusEventActor")
+  postingsDecided      JobPosting[]           @relation("PostingDecider")
+  roundResults         RoundResult[]          @relation("RoundEvaluator")
+  jobsCreated          Job[]                  @relation("JobCreator")
+  invitesSent          Invite[]               @relation("InviteSender")
+  invitesToClaim       Invite[]               @relation("InviteAccount")
+  companiesReviewed    Company[]              @relation("CompanyReviewer")
+  companyPosts         CompanyPost[]          @relation("CompanyPostAuthor")
+  interviewProcesses   InterviewProcess[]     @relation("InterviewProcessCreator")
+  interviewInvitesSent InterviewInvite[]      @relation("InterviewInviteSender")
+  assessmentsSet       Assessment[]           @relation("AssessmentAuthor")
+  assessmentsMarked    AssessmentAssignment[] @relation("AssessmentReviewer")
+  posts                Post[]                 @relation("PostAuthor")
+  postComments         PostComment[]          @relation("CommentAuthor")
+  postLikes            PostLike[]             @relation("PostLiker")
+  counselling          CounsellingRequest[]   @relation("Counsellor")
 
   adminMember     AdminMember?
-  jobTeams        JobTeamMember[] @relation("JobTeam")
-  authoredNotices Notice[]        @relation("NoticeAuthor")
+  jobTeams        JobTeamMember[]   @relation("JobTeam")
+  authoredNotices Notice[]          @relation("NoticeAuthor")
   programAliases  ProgramAlias[]
   offersSent      InternshipOffer[] @relation("OfferSender")
 
@@ -1894,42 +1894,45 @@ model RoundResult {
 /// decides what rounds a candidate goes through, in what order, and can then
 /// attach this process to any role they post.
 model InterviewProcess {
-  id          String               @id @default(cuid())
+  id          String   @id @default(cuid())
   companyId   String
   createdById String
   title       String
-  description String?              @db.Text
-  processType String               @default("HIRING")
-  status      String               @default("DRAFT")
-  createdAt   DateTime             @default(now())
-  updatedAt   DateTime             @updatedAt
+  description String?  @db.Text
+  processType String   @default("HIRING")
+  status      String   @default("DRAFT")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  company   Company                @relation(fields: [companyId], references: [id], onDelete: Cascade)
-  createdBy User                   @relation("InterviewProcessCreator", fields: [createdById], references: [id])
+  company   Company                 @relation(fields: [companyId], references: [id], onDelete: Cascade)
+  createdBy User                    @relation("InterviewProcessCreator", fields: [createdById], references: [id])
   rounds    InterviewProcessRound[]
+  invites   InterviewInvite[]
 
   @@index([companyId])
 }
 
 /// One round inside a company's reusable interview process.
 model InterviewProcessRound {
-  id                String  @id @default(cuid())
-  processId         String
-  order             Int
-  name              String
-  type              String  @default("RESUME_SCREEN")
-  isElimination     Boolean @default(false)
-  description       String? @db.Text
-  isOnline          Boolean @default(false)
-  meetingLink       String? @db.Text
-  addressLine       String? @db.Text
-  shortlistCount    Int?
-  durationMin       Int?
-  mode              String?
+  id              String  @id @default(cuid())
+  processId       String
+  order           Int
+  name            String
+  type            String  @default("RESUME_SCREEN")
+  isElimination   Boolean @default(false)
+  description     String? @db.Text
+  isOnline        Boolean @default(false)
+  meetingLink     String? @db.Text
+  addressLine     String? @db.Text
+  shortlistCount  Int?
+  durationMin     Int?
+  mode            String?
   /// Per-question time limit in seconds for VIDEO_INTERVIEW rounds (default 90s).
-  questionTimeSec   Int?
+  questionTimeSec Int?
   /// Preparation time before recording in seconds for VIDEO_INTERVIEW rounds (default 30s).
-  prepTimeSec       Int?
+  prepTimeSec     Int?
+  /// For a WORK_SIMULATION round: which of the company's live simulations to do.
+  simulationId    String? @db.VarChar(40)
 
   process   InterviewProcess         @relation(fields: [processId], references: [id], onDelete: Cascade)
   questions VideoInterviewQuestion[]
@@ -1942,16 +1945,17 @@ model InterviewProcessRound {
 /// The candidate reads the question, gets prepTimeSec to think, then
 /// questionTimeSec to record their answer.
 model VideoInterviewQuestion {
-  id        String @id @default(cuid())
-  roundId   String
-  order     Int
-  text      String @db.VarChar(600)
+  id      String  @id @default(cuid())
+  roundId String
+  order   Int
+  text    String  @db.VarChar(600)
   /// hint shown to the candidate before they start recording; optional.
-  hint      String? @db.VarChar(400)
+  hint    String? @db.VarChar(400)
   /// intro | behavioural | situational | technical | motivation
-  type      String  @default("behavioural")
+  type    String  @default("behavioural")
 
-  round InterviewProcessRound @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  round   InterviewProcessRound  @relation(fields: [roundId], references: [id], onDelete: Cascade)
+  answers InterviewVideoAnswer[]
 
   @@unique([roundId, order])
   @@index([roundId])
@@ -1960,12 +1964,12 @@ model VideoInterviewQuestion {
 /// A predefined question-pack a company can import into a VIDEO_INTERVIEW
 /// round. Built by the platform team; companies read and clone these.
 model InterviewQuestionPackage {
-  id          String @id @default(cuid())
+  id          String   @id @default(cuid())
   title       String
-  description String? @db.Text
-  role        String  @default("")  /// empty = generic; otherwise role-specific
-  kind        String  @default("VIDEO_INTERVIEW")
-  questions   Json    @default("[]")  /// [{order, text, hint, type}]
+  description String?  @db.Text
+  role        String   @default("") /// empty = generic; otherwise role-specific
+  kind        String   @default("VIDEO_INTERVIEW")
+  questions   Json     @default("[]") /// [{order, text, hint, type}]
   createdAt   DateTime @default(now())
 }
 
@@ -1991,22 +1995,43 @@ model InterviewInvite {
   process        InterviewProcess         @relation(fields: [processId], references: [id], onDelete: Cascade)
   sentBy         User                     @relation("InterviewInviteSender", fields: [sentById], references: [id])
   roundFeedbacks InterviewRoundFeedback[]
+  videoAnswers   InterviewVideoAnswer[]
 
   @@index([companyId])
   @@index([candidateId])
 }
 
+/// A student's recorded answer to one question of a VIDEO_INTERVIEW round.
+/// Recorded again, it replaces the earlier take - until the company has
+/// given its verdict on that round.
+model InterviewVideoAnswer {
+  id         String   @id @default(cuid())
+  inviteId   String
+  questionId String
+  fileUrl    String   @db.VarChar(500)
+  /// How long the take is, as the browser measured it.
+  seconds    Int?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  invite   InterviewInvite        @relation(fields: [inviteId], references: [id], onDelete: Cascade)
+  question VideoInterviewQuestion @relation(fields: [questionId], references: [id], onDelete: Cascade)
+
+  @@unique([inviteId, questionId])
+  @@index([questionId])
+}
+
 /// Feedback recorded by the company for one round of an interview invite.
 model InterviewRoundFeedback {
-  id          String   @id @default(cuid())
-  inviteId    String
-  roundOrder  Int
-  roundName   String
-  outcome     String   @default("PENDING")
-  score       Decimal? @db.Decimal(5, 2)
-  notes       String?  @db.Text
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  id         String   @id @default(cuid())
+  inviteId   String
+  roundOrder Int
+  roundName  String
+  outcome    String   @default("PENDING")
+  score      Decimal? @db.Decimal(5, 2)
+  notes      String?  @db.Text
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 
   invite InterviewInvite @relation(fields: [inviteId], references: [id], onDelete: Cascade)
 
@@ -3737,17 +3762,17 @@ model InternshipOffer {
   runId       String?
   sentById    String
 
-  role     String  @db.VarChar(120)
+  role      String    @db.VarChar(120)
   /// What the intern will do, in the company's words.
-  about    String  @db.Text
+  about     String    @db.Text
   /// REMOTE, OFFICE or HYBRID.
-  workMode String  @db.VarChar(10)
-  city     String? @db.VarChar(80)
-  months   Int
-  startsOn DateTime? @db.Date
+  workMode  String    @db.VarChar(10)
+  city      String?   @db.VarChar(80)
+  months    Int
+  startsOn  DateTime? @db.Date
   /// Rupees a month; null when it is unpaid.
-  stipend  Int?
-  respondBy DateTime @db.Date
+  stipend   Int?
+  respondBy DateTime  @db.Date
   /// When the company promised the student pays nothing to take it.
   noFeeAt   DateTime
 

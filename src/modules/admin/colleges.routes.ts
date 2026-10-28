@@ -275,7 +275,7 @@ collegesRouter.get(
             role: { select: { id: true, name: true } },
           },
         },
-        _count: { select: { batches: true, placements: true } },
+        _count: { select: { batches: true, candidates: true } },
       },
     });
 

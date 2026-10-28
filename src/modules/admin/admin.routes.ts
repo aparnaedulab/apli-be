@@ -1,11 +1,10 @@
 import { Router } from 'express';
 import { z } from 'zod';
-import { ApplicationStatus, JobStatus, Prisma, Role } from '@prisma/client';
+import { Prisma, Role } from '@prisma/client';
 import { prisma } from '../../lib/prisma.js';
 import { badRequest, conflict, notFound } from '../../lib/errors.js';
 import { asyncHandler } from '../../middleware/errorHandler.js';
 import { requireRole } from '../../middleware/auth.js';
-import { canPublish, verifiedCompany } from '../company/verification.js';
 import { homeUniversityOf } from './colleges.bulk.js';
 import { addStudents } from '../campus/students.service.js';
 import { buildStudentTemplate } from '../campus/students.template.js';
@@ -20,6 +19,16 @@ import {
 import { can } from '../roles/can.js';
 import { inTenant, requireTenantId } from '../tenants/tenant.context.js';
 import { operationsOverview } from './overview.service.js';
+import {
+  activityQuery,
+  activityStats,
+  listInterviews,
+  listOffers,
+  listRuns,
+  listSimulations,
+  listStudents,
+  studentDetail,
+} from './studentActivity.js';
 import { activeGenders } from '../students/lists.js';
 import { assertMayAdd, policyForCollege } from '../students/policy.js';
 import { programmeIndex } from '../students/programme.js';
@@ -279,87 +288,24 @@ adminRouter.get(
   }),
 );
 
+/**
+ * GET /api/admin/stats - the institution's students and what they are doing
+ * in the student app: simulations, internship offers and interviews.
+ */
 adminRouter.get(
   '/stats',
   can('report:read'),
   asyncHandler(async (req, res) => {
     const t = requireTenantId(req);
-    const application = inTenant.application(t);
-
-    const [
-      colleges,
-      companies,
-      verifiedCompanies,
-      users,
-      students,
-      frozen,
-      batches,
-      openDrives,
-      jobs,
-      publishedJobs,
-      pendingPostings,
-      applications,
-      pendingInvites,
-      byStatus,
-    ] = await Promise.all([
+    const [activity, colleges, batches, pendingInvites] = await Promise.all([
+      activityStats(inTenant.candidate(t)),
       prisma.college.count({ where: inTenant.college(t) }),
-      // Companies are shared by every institution, so these two describe the
-      // marketplace the tenant can draw on rather than rows it owns.
-      prisma.company.count(),
-      prisma.company.count({ where: verifiedCompany }),
-      prisma.user.count({ where: inTenant.user(t) }),
-      prisma.candidate.count({ where: inTenant.candidate(t) }),
-      prisma.batchMembership.count({ where: { isFrozen: true, batch: { tenantId: t } } }),
       prisma.batch.count({ where: inTenant.batch(t) }),
-      prisma.placement.count({ where: { isOpen: true, ...inTenant.placement(t) } }),
-      prisma.job.count({ where: inTenant.job(t) }),
-      prisma.job.count({ where: { status: JobStatus.PUBLISHED, ...inTenant.job(t) } }),
-      prisma.jobPosting.count({
-        where: {
-          status: 'PENDING',
-          job: { status: { not: JobStatus.DRAFT } },
-          placement: { college: { tenantId: t } },
-        },
-      }),
-      prisma.application.count({ where: application }),
       prisma.invite.count({
         where: { AND: [{ acceptedAt: null, revokedAt: null }, inTenant.invite(t)] },
       }),
-      prisma.application.groupBy({
-        by: ['status'],
-        where: application,
-        _count: { _all: true },
-      }),
     ]);
-
-    const placed = await prisma.application.count({
-      where: {
-        status: { in: [ApplicationStatus.ACCEPTED, ApplicationStatus.HIRED] },
-        ...application,
-      },
-    });
-
-    res.json({
-      stats: {
-        colleges,
-        companies,
-        verifiedCompanies,
-        unverifiedCompanies: companies - verifiedCompanies,
-        users,
-        students,
-        frozen,
-        unverifiedStudents: students - frozen,
-        batches,
-        openDrives,
-        jobs,
-        publishedJobs,
-        pendingPostings,
-        applications,
-        placed,
-        pendingInvites,
-      },
-      funnel: Object.fromEntries(byStatus.map((r) => [r.status, r._count._all])),
-    });
+    res.json({ ...activity, colleges, batches, pendingInvites });
   }),
 );
 
@@ -455,62 +401,50 @@ adminRouter.get(
   '/students',
   can('student:read'),
   asyncHandler(async (req, res) => {
-    const p = listQuery
-      .extend({ verified: z.enum(['true', 'false']).optional() })
-      .parse(req.query);
+    res.json(await listStudents(inTenant.candidate(requireTenantId(req)), activityQuery.parse(req.query)));
+  }),
+);
 
-    const where: Prisma.CandidateWhereInput = {
-      AND: [
-        inTenant.candidate(requireTenantId(req)),
-        p.q
-          ? {
-              OR: [
-                { user: { email: { contains: p.q } } },
-                { user: { fullName: { contains: p.q } } },
-              ],
-            }
-          : {},
-        p.verified ? { batchMemberships: { some: { isFrozen: p.verified === 'true' } } } : {},
-      ],
-    };
+adminRouter.get(
+  '/students/:id',
+  can('student:read'),
+  asyncHandler(async (req, res) => {
+    const id = z.string().trim().min(1).max(40).parse(req.params.id);
+    res.json(await studentDetail(inTenant.candidate(requireTenantId(req)), id));
+  }),
+);
 
-    const [rows, total] = await Promise.all([
-      prisma.candidate.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        ...skipTake(p),
-        include: {
-          user: { select: { fullName: true, email: true, isActive: true } },
-          college: { select: { name: true } },
-          batchMemberships: { include: { batch: { select: { name: true, course: true } } } },
-          _count: { select: { applications: true } },
-        },
-      }),
-      prisma.candidate.count({ where }),
-    ]);
+/* What the institution's students are doing in the student app. */
 
-    res.json(
-      paged(
-        rows.map((c) => {
-          const m = c.batchMemberships[0];
-          return {
-            id: c.id,
-            name: c.user.fullName,
-            email: c.user.email,
-            college: c.college?.name ?? null,
-            batch: m?.batch.name ?? null,
-            course: m?.batch.course ?? null,
-            rollNo: m?.rollNo ?? null,
-            isFrozen: m?.isFrozen ?? false,
-            cgpa: c.cgpa,
-            applications: c._count.applications,
-          };
-        }),
-        total,
-        p.page,
-        p.pageSize,
-      ),
-    );
+adminRouter.get(
+  '/simulations',
+  can('student:read'),
+  asyncHandler(async (req, res) => {
+    res.json(await listSimulations(inTenant.candidate(requireTenantId(req)), activityQuery.parse(req.query)));
+  }),
+);
+
+adminRouter.get(
+  '/work',
+  can('student:read'),
+  asyncHandler(async (req, res) => {
+    res.json(await listRuns(inTenant.candidate(requireTenantId(req)), activityQuery.parse(req.query)));
+  }),
+);
+
+adminRouter.get(
+  '/offers',
+  can('student:read'),
+  asyncHandler(async (req, res) => {
+    res.json(await listOffers(inTenant.candidate(requireTenantId(req)), activityQuery.parse(req.query)));
+  }),
+);
+
+adminRouter.get(
+  '/interviews',
+  can('student:read'),
+  asyncHandler(async (req, res) => {
+    res.json(await listInterviews(inTenant.candidate(requireTenantId(req)), activityQuery.parse(req.query)));
   }),
 );
 
@@ -578,208 +512,6 @@ adminRouter.get(
           students: b._count.memberships,
           verified: frozenBy.get(b.id) ?? 0,
           drives: b._count.placements,
-        })),
-        total,
-        p.page,
-        p.pageSize,
-      ),
-    );
-  }),
-);
-
-/* -------------------------------------------------------------------------- */
-/* Drives                                                                      */
-/* -------------------------------------------------------------------------- */
-
-adminRouter.get(
-  '/drives',
-  can('drive:read'),
-  asyncHandler(async (req, res) => {
-    const p = listQuery.parse(req.query);
-    const t = requireTenantId(req);
-    const where: Prisma.PlacementWhereInput = {
-      AND: [
-        inTenant.placement(t),
-        p.q ? { OR: [{ name: { contains: p.q } }, { college: { name: { contains: p.q } } }] } : {},
-      ],
-    };
-
-    const [rows, total] = await Promise.all([
-      prisma.placement.findMany({
-        where,
-        orderBy: [{ year: 'desc' }, { name: 'asc' }],
-        ...skipTake(p),
-        include: {
-          college: { select: { name: true } },
-          batches: { select: { _count: { select: { memberships: true } } } },
-          _count: { select: { jobPostings: true, applications: true } },
-        },
-      }),
-      prisma.placement.count({ where }),
-    ]);
-
-    const placedRows = await prisma.application.groupBy({
-      by: ['placementId'],
-      where: {
-        status: { in: [ApplicationStatus.ACCEPTED, ApplicationStatus.HIRED] },
-        ...inTenant.application(t),
-      },
-      _count: { _all: true },
-    });
-    const placedBy = new Map(placedRows.map((r) => [r.placementId, r._count._all]));
-
-    res.json(
-      paged(
-        rows.map((d) => {
-          const students = d.batches.reduce((n, b) => n + b._count.memberships, 0);
-          const placed = placedBy.get(d.id) ?? 0;
-          return {
-            id: d.id,
-            name: d.name,
-            college: d.college.name,
-            type: d.type,
-            year: d.year,
-            isOpen: d.isOpen,
-            oneOfferRule: d.oneOfferRule,
-            students,
-            jobs: d._count.jobPostings,
-            applications: d._count.applications,
-            placed,
-            placedPercent: students ? Math.round((placed / students) * 100) : 0,
-          };
-        }),
-        total,
-        p.page,
-        p.pageSize,
-      ),
-    );
-  }),
-);
-
-/* -------------------------------------------------------------------------- */
-/* Jobs                                                                        */
-/* -------------------------------------------------------------------------- */
-
-adminRouter.get(
-  '/jobs',
-  can('job:read'),
-  asyncHandler(async (req, res) => {
-    const p = listQuery.extend({ status: z.nativeEnum(JobStatus).optional() }).parse(req.query);
-
-    const t = requireTenantId(req);
-    const where: Prisma.JobWhereInput = {
-      AND: [
-        inTenant.job(t),
-        p.status ? { status: p.status } : {},
-        p.q ? { OR: [{ title: { contains: p.q } }, { company: { name: { contains: p.q } } }] } : {},
-      ],
-    };
-
-    const [rows, total] = await Promise.all([
-      prisma.job.findMany({
-        where,
-        orderBy: { createdAt: 'desc' },
-        ...skipTake(p),
-        include: {
-          company: { select: { name: true, status: true } },
-          // A role is shared across institutions; what this tenant sees of it
-          // is its own colleges' decisions and its own students' applications.
-          postings: {
-            where: { placement: { college: { tenantId: t } } },
-            select: { status: true },
-          },
-          _count: {
-            select: { rounds: true, applications: { where: inTenant.application(t) } },
-          },
-        },
-      }),
-      prisma.job.count({ where }),
-    ]);
-
-    res.json(
-      paged(
-        rows.map((j) => ({
-          id: j.id,
-          title: j.title,
-          company: j.company.name,
-          companyVerified: canPublish(j.company.status),
-          status: j.status,
-          deadline: j.deadline,
-          ctcMin: j.ctcMin,
-          ctcMax: j.ctcMax,
-          rounds: j._count.rounds,
-          applications: j._count.applications,
-          accepted: j.postings.filter((x) => x.status === 'ACCEPTED').length,
-          pending: j.postings.filter((x) => x.status === 'PENDING').length,
-          declined: j.postings.filter((x) => x.status === 'DECLINED').length,
-        })),
-        total,
-        p.page,
-        p.pageSize,
-      ),
-    );
-  }),
-);
-
-/* -------------------------------------------------------------------------- */
-/* Applications                                                                */
-/* -------------------------------------------------------------------------- */
-
-adminRouter.get(
-  '/applications',
-  can('application:read'),
-  asyncHandler(async (req, res) => {
-    const p = listQuery
-      .extend({ status: z.nativeEnum(ApplicationStatus).optional() })
-      .parse(req.query);
-
-    const where: Prisma.ApplicationWhereInput = {
-      AND: [
-        inTenant.application(requireTenantId(req)),
-        p.status ? { status: p.status } : {},
-        p.q
-          ? {
-              OR: [
-                { candidate: { user: { fullName: { contains: p.q } } } },
-                { candidate: { user: { email: { contains: p.q } } } },
-                { job: { title: { contains: p.q } } },
-              ],
-            }
-          : {},
-      ],
-    };
-
-    const [rows, total] = await Promise.all([
-      prisma.application.findMany({
-        where,
-        orderBy: { updatedAt: 'desc' },
-        ...skipTake(p),
-        include: {
-          candidate: {
-            select: { user: { select: { fullName: true, email: true } }, college: { select: { name: true } } },
-          },
-          job: { select: { title: true, company: { select: { name: true } } } },
-          placement: { select: { name: true } },
-          currentRound: { select: { order: true, name: true } },
-        },
-      }),
-      prisma.application.count({ where }),
-    ]);
-
-    res.json(
-      paged(
-        rows.map((a) => ({
-          id: a.id,
-          student: a.candidate.user.fullName,
-          email: a.candidate.user.email,
-          college: a.candidate.college?.name ?? null,
-          job: a.job.title,
-          company: a.job.company.name,
-          drive: a.placement.name,
-          status: a.status,
-          round: a.currentRound ? `${a.currentRound.order}. ${a.currentRound.name}` : null,
-          appliedAt: a.appliedAt,
-          updatedAt: a.updatedAt,
         })),
         total,
         p.page,

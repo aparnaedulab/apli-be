@@ -83,6 +83,7 @@ import { interviewProcessRouter } from './modules/companyApp/interviewProcess.ro
 import { interviewInviteRouter } from './modules/companyApp/interviewInvite.routes.js';
 import { studentInterviewInviteRouter } from './modules/companyApp/interviewInvite.student.routes.js';
 import { simulationReviewRouter, studentAppRouter } from './modules/studentApp/studentApp.routes.js';
+import { platformActivityRouter } from './modules/admin/platformActivity.routes.js';
 import { listingsRouter } from './modules/students/listings.routes.js';
 import { partnerAdminRouter, partnerPublicRouter } from './modules/partners/partners.routes.js';
 import {
@@ -195,6 +196,8 @@ export function createApp(): Express {
   api.use('/platform/listings', listingsRouter);
   api.use('/platform/reviews', simulationReviewRouter);
   api.use('/platform/simulations', simulationCheckRouter);
+  // Every student and what they are doing, including those on no institution.
+  api.use('/platform/activity', platformActivityRouter);
   api.use('/platform', platformRouter);
   api.use('/public', publicTenantRouter);
   // A student putting themselves on their college's roster, when the

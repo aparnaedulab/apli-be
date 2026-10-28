@@ -78,6 +78,7 @@ const jobCard = {
   ctcFixed: true,
   stipendPerMonth: true,
   internshipMonths: true,
+  ppoCtc: true,
   deadline: true,
   // When it went out, which is half of how a student judges their odds - the
   // other half being how many have applied since.
@@ -86,7 +87,7 @@ const jobCard = {
   // with a disability, are both things a student scanning the list looks for.
   genderEligibility: true,
   pwdSuitable: true,
-  company: { select: { name: true } },
+  company: { select: { id: true, name: true, logoUrl: true } },
   _count: { select: { rounds: true, applications: true } },
   // What the role asks for, so a student can be told which of them they
   // already have rather than left to compare two lists by eye.
@@ -235,7 +236,13 @@ studentJobsRouter.get(
         id: j.id,
         title: j.title,
         companyName: j.company.name,
+        company: j.company,
         jobType: j.jobType,
+        // An internship's pay is a monthly stipend, and its length; a role may
+        // also say what it converts to.
+        stipend: j.stipendPerMonth,
+        internshipMonths: j.internshipMonths,
+        ppoCtc: j.ppoCtc,
         location: j.location,
         ctcMin: j.ctcMin,
         ctcMax: j.ctcMax,
@@ -524,6 +531,27 @@ studentJobsRouter.post(
 
       return created;
     });
+
+    // The company's team hears about it, and its Jobs section counts it.
+    const [who, role] = await Promise.all([
+      prisma.candidate.findUnique({ where: { id: candidateId }, select: { user: { select: { fullName: true } }, college: { select: { name: true } } } }),
+      prisma.job.findUnique({ where: { id: job.id }, select: { title: true, companyId: true } }),
+    ]);
+    if (role) {
+      const team = await prisma.companyMember.findMany({ where: { companyId: role.companyId }, select: { userId: true } });
+      if (team.length) {
+        await prisma.notification.createMany({
+          data: team.map((m) => ({
+            userId: m.userId,
+            type: 'job.applied',
+            title: `${who?.user.fullName ?? 'A student'} applied for ${role.title}`,
+            body: who?.college?.name ?? null,
+            link: `/company/jobs/${job.id}/applicants`,
+            payload: { applicationId: application.id, jobId: job.id },
+          })),
+        });
+      }
+    }
 
     res.status(201).json({ application });
   }),

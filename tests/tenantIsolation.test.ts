@@ -142,7 +142,7 @@ describe('a tenant admin', () => {
     const res = await call('GET', '/admin/stats');
 
     expect(res.status).toBe(200);
-    expect(res.body.stats.colleges).toBe(1);
+    expect(res.body.colleges).toBe(1);
   });
 
   it('cannot create or edit a role, because roles are shared by every institution', async () => {

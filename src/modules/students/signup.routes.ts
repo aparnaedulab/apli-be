@@ -78,15 +78,32 @@ signupRouter.get(
  * GET /api/public/colleges?q=pic
  *
  * Up to eight colleges whose name or city matches: partner colleges whose
- * institution is live, then the directory.
+ * institution is live, then the directory. With less than two letters, the
+ * partner colleges themselves.
  */
 signupRouter.get(
   '/colleges',
   searchLimiter,
   asyncHandler(async (req, res) => {
     const q = String(req.query.q ?? '').trim();
+    // Nothing typed yet: offer the partner colleges, so a student sees where
+    // they can sign up before they search.
     if (q.length < 2) {
-      res.json({ colleges: [] });
+      const partners = await prisma.college.findMany({
+        where: LIVE_COLLEGE,
+        orderBy: { name: 'asc' },
+        take: 12,
+        select: { id: true, name: true, city: true, tenant: { select: { shortName: true, name: true } } },
+      });
+      res.json({
+        colleges: partners.map((c) => ({
+          id: c.id,
+          source: 'partner' as const,
+          name: c.name,
+          city: c.city,
+          institution: c.tenant.shortName ?? c.tenant.name,
+        })),
+      });
       return;
     }
 
@@ -148,14 +165,20 @@ signupRouter.get(
       prisma.course.findMany({
         where: { isActive: true },
         orderBy: { name: 'asc' },
-        select: { name: true, level: true, years: true },
+        select: {
+          name: true,
+          level: true,
+          years: true,
+          specialisations: { where: { isActive: true }, orderBy: { name: 'asc' }, select: { name: true } },
+        },
       }),
       activeGenders(),
       activeInterests(),
     ]);
     res.json({
-      // Each with its level, so the form offers only the courses of the level picked.
-      courses,
+      // Each with its level, so the form offers only the courses of the level
+      // picked, and its branches, which the form suggests for that course.
+      courses: courses.map((c) => ({ ...c, specialisations: c.specialisations.map((s) => s.name) })),
       genders,
       degreeLevels: DEGREE_LEVELS,
       interests,
@@ -201,7 +224,9 @@ const signupSchema = z
       .regex(/^\d{4}-\d{2}-\d{2}$/, 'Enter your date of birth.')
       .transform((v) => new Date(`${v}T00:00:00.000Z`))
       .refine((d) => !Number.isNaN(d.getTime()), 'Enter your date of birth.')
-      .refine((d) => ageOn(d) >= 14 && ageOn(d) <= 70, 'Check your date of birth.'),
+      .refine((d) => d.getTime() < Date.now(), 'Your date of birth cannot be today or in the future.')
+      .refine((d) => ageOn(d) >= 14, 'You need to be at least 14 years old to sign up.')
+      .refine((d) => ageOn(d) <= 70, 'Check the year - that is more than 70 years ago.'),
     /** Out of 10. The college confirms it later; until then it is the student's word. */
     cgpa: z.coerce
       .number()
@@ -290,12 +315,13 @@ signupRouter.post(
     const listed = await prisma.course.findFirst({ where: { name: body.course, isActive: true }, select: { level: true } });
     const degreeLevel = listed?.level ?? body.degreeLevel;
 
-    // Interests come from the list the platform team keeps.
+    // Interests come from the list the platform team keeps, plus at most one
+    // of the student's own ("Other"), for a field the list does not have.
     if (body.interests.length) {
       const offered = new Set(await activeInterests());
-      if (body.interests.some((i) => !offered.has(i))) {
-        throw badRequest('Pick your interests from the list.');
-      }
+      const own = body.interests.filter((i) => !offered.has(i));
+      if (own.length > 1) throw badRequest('Pick your interests from the list, and add at most one of your own.');
+      if (own.some((i) => i.length > 40)) throw badRequest('Keep your own field short - 40 characters at most.');
     }
 
     const passwordHash = await hashPassword(body.password);

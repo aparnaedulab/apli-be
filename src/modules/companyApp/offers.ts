@@ -63,7 +63,7 @@ const shownStatus = (o: { status: InternshipOfferStatus; respondBy: Date }) => (
  * simulations handed in for review (or approved), shared with it, or a test
  * from one sent to it.
  */
-async function hasShownWork(companyId: string, candidateId: string) {
+export async function hasShownWork(companyId: string, candidateId: string) {
   const run = await prisma.workSimulationRun.findFirst({
     where: {
       candidateId,

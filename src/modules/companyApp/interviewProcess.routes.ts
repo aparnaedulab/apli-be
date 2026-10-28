@@ -4,10 +4,13 @@ import { asyncHandler } from '../../middleware/errorHandler.js';
 import { requireCompanyId, requireRole } from '../../middleware/auth.js';
 import {
   createProcess,
+  duplicateProcess,
   getProcess,
   listProcesses,
+  questionPacks,
   removeProcess,
   setProcessRounds,
+  simulationChoices,
   updateProcess,
 } from './interviewProcess.service.js';
 
@@ -55,6 +58,21 @@ const roundsSchema = z.object({
         shortlistCount: z.coerce.number().int().min(1).max(100_000).optional(),
         durationMin: z.coerce.number().int().min(5).max(1440).optional(),
         mode: optional(60),
+        /** Recorded interview: seconds to think, then to answer, per question. */
+        questionTimeSec: z.coerce.number().int().min(30, 'Give at least 30 seconds to answer.').max(600).optional(),
+        prepTimeSec: z.coerce.number().int().min(0).max(300).optional(),
+        /** Work-simulation round: which simulation. */
+        simulationId: z.string().trim().max(40).optional().or(z.literal('')),
+        questions: z
+          .array(
+            z.object({
+              text: z.string().trim().min(5, 'Write the question.').max(600),
+              hint: optional(400),
+              type: z.enum(['intro', 'behavioural', 'situational', 'technical', 'motivation']).default('behavioural'),
+            }),
+          )
+          .max(10, 'Up to ten questions in a round.')
+          .default([]),
       }),
     )
     .max(12, 'Twelve rounds is more than enough.'),
@@ -80,6 +98,22 @@ interviewProcessRouter.post(
       processType: data.processType,
     });
     res.status(201).json({ process });
+  }),
+);
+
+/** GET /api/company/interview-processes/packs - question packs for a recorded interview. */
+interviewProcessRouter.get(
+  '/packs',
+  asyncHandler(async (_req, res) => {
+    res.json({ packs: await questionPacks() });
+  }),
+);
+
+/** GET /api/company/interview-processes/simulations - the company's live simulations, for a round. */
+interviewProcessRouter.get(
+  '/simulations',
+  asyncHandler(async (req, res) => {
+    res.json({ simulations: await simulationChoices(requireCompanyId(req)) });
   }),
 );
 
@@ -127,9 +161,22 @@ interviewProcessRouter.put(
         shortlistCount: r.shortlistCount ?? null,
         durationMin: r.durationMin ?? null,
         mode: r.mode || null,
+        questionTimeSec: r.questionTimeSec ?? null,
+        prepTimeSec: r.prepTimeSec ?? null,
+        simulationId: r.simulationId || null,
+        questions: r.questions.map((q) => ({ text: q.text, hint: q.hint || null, type: q.type })),
       })),
     );
     res.json({ process });
+  }),
+);
+
+/** POST /api/company/interview-processes/:id/duplicate - a fresh draft copy, to change one in use. */
+interviewProcessRouter.post(
+  '/:id/duplicate',
+  asyncHandler(async (req, res) => {
+    const process = await duplicateProcess(requireCompanyId(req), req.session.userId!, req.params.id!);
+    res.status(201).json({ process });
   }),
 );
 

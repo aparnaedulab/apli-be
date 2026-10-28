@@ -752,7 +752,43 @@ export async function explainWork(candidateId: string, slug: string, input: { ho
       lastActiveAt: new Date(),
     },
   });
+
+  // The company reviews it, so the company hears about it.
+  const who = await studentName(candidateId);
+  const sim = await prisma.workSimulation.findUniqueOrThrow({ where: { slug }, select: { companyId: true, title: true } });
+  await notifyCompany(sim.companyId, {
+    type: 'simulation.handed-in',
+    title: `${who} handed in ${sim.title} for review`,
+    body: run.status === RunStatus.NEEDS_WORK ? 'They made the changes you asked for.' : 'Every task is in, with their explanation.',
+    link: '/company/reviews',
+    payload: { runId: run.id },
+  });
   return simulationDetail(candidateId, slug);
+}
+
+/** The student's name, for a notification. */
+async function studentName(candidateId: string) {
+  const c = await prisma.candidate.findUnique({ where: { id: candidateId }, select: { user: { select: { fullName: true } } } });
+  return c?.user.fullName ?? 'A student';
+}
+
+/** A notification to everyone on a company's team. */
+async function notifyCompany(
+  companyId: string,
+  n: { type: string; title: string; body?: string; link: string; payload?: Prisma.InputJsonValue },
+) {
+  const members = await prisma.companyMember.findMany({ where: { companyId }, select: { userId: true } });
+  if (!members.length) return;
+  await prisma.notification.createMany({
+    data: members.map((m) => ({
+      userId: m.userId,
+      type: n.type,
+      title: n.title,
+      body: n.body ?? null,
+      link: n.link,
+      payload: n.payload ?? {},
+    })),
+  });
 }
 
 /* -------------------------------------------------------------------------- */
@@ -789,6 +825,8 @@ export async function setShares(candidateId: string, runId: string, companyIds: 
   const allowed = new Set(options.companies.map((c) => c.id));
   const wanted = [...new Set(companyIds)];
   if (wanted.some((id) => !allowed.has(id))) throw badRequest('Pick companies from the list.');
+  const before = new Set(options.companies.filter((c) => c.shared).map((c) => c.id));
+  const added = wanted.filter((id) => !before.has(id));
   await prisma.$transaction([
     prisma.workSimulationShare.deleteMany({ where: { runId, companyId: { notIn: wanted } } }),
     ...wanted.map((companyId) =>
@@ -799,6 +837,22 @@ export async function setShares(candidateId: string, runId: string, companyIds: 
       }),
     ),
   ]);
+  if (added.length) {
+    const who = await studentName(candidateId);
+    const run = await prisma.workSimulationRun.findUniqueOrThrow({
+      where: { id: runId },
+      select: { simulation: { select: { title: true, company: { select: { name: true } } } } },
+    });
+    for (const companyId of added) {
+      await notifyCompany(companyId, {
+        type: 'simulation.shared',
+        title: `${who} shared verified work with you`,
+        body: `${run.simulation.title} - ${run.simulation.company.name}`,
+        link: '/company/shared',
+        payload: { runId },
+      });
+    }
+  }
   return shareOptions(candidateId, runId);
 }
 
@@ -967,7 +1021,14 @@ export async function reviewQueue() {
 
 /** Approves a simulation (issuing its certificate) or sends it back with a note. */
 export async function review(reviewerId: string, runId: string, input: { decision: 'approve' | 'changes'; note?: string }) {
-  const run = await prisma.workSimulationRun.findUnique({ where: { id: runId }, select: { status: true } });
+  const run = await prisma.workSimulationRun.findUnique({
+    where: { id: runId },
+    select: {
+      status: true,
+      candidate: { select: { userId: true } },
+      simulation: { select: { title: true, slug: true } },
+    },
+  });
   if (!run) throw notFound('No such submission.');
   if (run.status !== RunStatus.IN_REVIEW) throw conflict('This is not waiting for review.');
   if (input.decision === 'changes' && !input.note?.trim()) throw badRequest('Say what needs changing.');
@@ -991,6 +1052,21 @@ export async function review(reviewerId: string, runId: string, input: { decisio
             reviewedById: reviewerId,
             reviewNote: input.note!.trim(),
           },
+  });
+
+  // The student is told either way: a certificate to share, or what to fix.
+  const approved = input.decision === 'approve';
+  await prisma.notification.create({
+    data: {
+      userId: run.candidate.userId,
+      type: approved ? 'SIMULATION_APPROVED' : 'SIMULATION_CHANGES',
+      title: approved
+        ? `Your work on ${run.simulation.title} is approved`
+        : `Changes asked on ${run.simulation.title}`,
+      body: approved ? 'Your certificate is ready to share.' : input.note!.trim(),
+      link: approved ? '/student/certificates' : `/student/simulations/${run.simulation.slug}`,
+      payload: { runId },
+    },
   });
 }
 

@@ -115,7 +115,7 @@ companiesRouter.get(
         where: status ? { status } : {},
         orderBy: [{ appliedAt: 'desc' }, { createdAt: 'desc' }],
         include: {
-          _count: { select: { members: true, jobs: true } },
+          _count: { select: { members: true, workSimulations: true } },
           industry: { select: { name: true } },
         },
       }),
@@ -134,7 +134,7 @@ companiesRouter.get(
         appliedAt: c.appliedAt,
         createdAt: c.createdAt,
         memberCount: c._count.members,
-        jobCount: c._count.jobs,
+        simulationCount: c._count.workSimulations,
       })),
       // Drives the tab badges. Absent statuses read as zero.
       counts: Object.fromEntries(counts.map((c) => [c.status, c._count])),
@@ -196,7 +196,7 @@ companiesRouter.get(
             role: { select: { id: true, name: true } },
           },
         },
-        _count: { select: { jobs: true } },
+        _count: { select: { workSimulations: true } },
         industry: { select: { id: true, name: true } },
       },
     });
