@@ -201,6 +201,16 @@ const schema = z.object({
    * names listed in modules/whatsapp/templates.ts.
    */
   WHATSAPP_TEMPLATES: optional(z.string().trim().min(2)),
+
+  /**
+   * Demo logins (modules/demoLogins): one account per situation, which the
+   * super admin can reset from the console. Off unless "true", because the
+   * demo companies' simulations are open to every student on the server -
+   * switch it on for a demo server only.
+   */
+  DEMO_LOGINS: optional(z.enum(['true', 'false']).transform((v) => v === 'true')),
+  /** The password every demo login shares. */
+  DEMO_PASSWORD: optional(z.string().min(8, 'DEMO_PASSWORD must be at least 8 characters.')),
 });
 
 const parsed = schema.safeParse(process.env);

@@ -32,6 +32,7 @@
     "seed:courses": "tsx src/scripts/seedCourses.ts",
     "seed:certificates": "tsx src/scripts/seedDemoCertificates.ts",
     "sync:roles": "tsx src/scripts/syncRoles.ts",
+    "demo:logins": "tsx src/scripts/demoLogins.ts",
     "prisma": "tsx src/scripts/prisma.ts",
     "db:migrate": "tsx src/scripts/prisma.ts migrate deploy",
     "db:generate": "tsx src/scripts/prisma.ts generate"
